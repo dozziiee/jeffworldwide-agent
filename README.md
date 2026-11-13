@@ -62,7 +62,7 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 
 ## Run locally
 
-Needs Node 20.6 or newer.
+Needs Node 20.6 or newer locally. `package.json` pins Node `26.x`, which is what Vercel runs; on an older local Node, `npm install` prints an engine warning that is safe to ignore.
 
 ```bash
 npm install

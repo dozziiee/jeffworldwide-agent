@@ -4,3 +4,5 @@ node_modules
 .vercel
 dist
 .DS_Store
+.env*
+!.env.example

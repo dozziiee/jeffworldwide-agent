@@ -4,7 +4,7 @@
   "private": true,
   "description": "Remote MCP server for Jeffworldwide: inventory search and Paystack deposit reservations backed by a Google Sheet.",
   "engines": {
-    "node": ">=20.6"
+    "node": "26.x"
   },
   "scripts": {
     "dev": "node --env-file=.env --import tsx src/local.ts",
