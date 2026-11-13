@@ -3,10 +3,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ServiceUnavailable } from "./http";
+import { compareMarket } from "./market";
 import { initializeTransaction, verifyTransaction } from "./paystack";
 import { quote } from "./pricing";
 import { searchCars, title, type SearchInput } from "./search";
-import { appendLog, loadSheet, writeReservation, type Car } from "./sheets";
+import { appendLog, loadMarket, loadSheet, writeReservation, type Car } from "./sheets";
 
 export type ToolResult = { status: string; message?: string; [key: string]: unknown };
 
@@ -139,6 +140,17 @@ export async function confirmReservation(input: { reference: string }): Promise<
   return result;
 }
 
+// ---------- 4. compare_market_price ----------
+
+export async function compareMarketPrice(input: { car_id: string }): Promise<ToolResult> {
+  if (!String(input.car_id ?? "").trim()) return { status: "invalid_input", message: "car_id is required." };
+
+  const [sheet, market] = await Promise.all([loadSheet(), loadMarket()]);
+  const car = findCar(sheet.cars, input.car_id);
+  if (!car) return { status: "car_not_found", message: `No car with id ${input.car_id}.` };
+  return compareMarket(car, quote(car, sheet.settings), market);
+}
+
 // ---------- wiring ----------
 
 /** "dozie@gmail.com" -> "d***@gmail.com", anywhere inside the inputs. */
@@ -202,7 +214,7 @@ export function registerTools(server: McpServer) {
     "search_inventory",
     {
       description:
-        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
+        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
       inputSchema: {
         query: z.string().optional().describe('Free text, e.g. "white GLC 43"'),
         make: z.string().optional(),
@@ -237,5 +249,15 @@ export function registerTools(server: McpServer) {
       inputSchema: { reference: z.string() },
     },
     (input) => runTool("confirm_reservation", input, () => confirmReservation(input)),
+  );
+
+  server.registerTool(
+    "compare_market_price",
+    {
+      description:
+        "Compare one of Jeffworldwide's cars with market asking prices for the same make, model and year (or the nearest year within one, flagged by exact_year_match: false). Returns Jeff's price, the market low and high, and difference_vs_low_ngn (Jeff's price minus the market low). Always pass on the note about asking prices. status: ok | no_comparison | car_not_found | invalid_input | service_unavailable.",
+      inputSchema: { car_id: z.string() },
+    },
+    (input) => runTool("compare_market_price", input, () => compareMarketPrice(input)),
   );
 }

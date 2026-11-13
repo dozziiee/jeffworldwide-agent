@@ -6,6 +6,7 @@ export type Settings = {
   depositPctInStock: number; // fraction
   depositPctPreOrder: number; // fraction
   holdHoursInStock: number;
+  doorstepDeliveryNgn: number; // flat naira amount added to every pre-order
 };
 
 export type CostsUsd = {
@@ -18,8 +19,11 @@ export type CostsUsd = {
 
 export type StockType = "in_stock" | "pre_order";
 
+export type PriceBasis = "to_your_doorstep" | "on_ground_lagos";
+
 export type Quote = {
   stock_type: StockType;
+  price_basis: PriceBasis; // pre-orders are priced delivered; in-stock cars as they stand in Lagos
   price_ngn: number;
   price_display: string;
   deposit_pct: number; // percent, e.g. 30
@@ -48,7 +52,7 @@ export function roundX9(naira: number): number {
 export function preOrderPriceNgn(costs: CostsUsd, settings: Settings): number {
   const totalUsd =
     costs.auctionPrice + costs.auctionFees + costs.groundShipping + costs.oceanShipping + costs.clearing;
-  return roundX9(totalUsd * settings.fxRateNgnPerUsd * (1 + settings.marginPct));
+  return roundX9(totalUsd * settings.fxRateNgnPerUsd * (1 + settings.marginPct) + settings.doorstepDeliveryNgn);
 }
 
 export function depositNgn(priceNgn: number, depositPct: number): number {
@@ -58,6 +62,11 @@ export function depositNgn(priceNgn: number, depositPct: number): number {
 /** Jeff's style: 59900000 -> "59.9m", 57990000 -> "57.99m". */
 export function formatMillions(naira: number): string {
   return `${Math.round(naira / 1000) / 1000}m`;
+}
+
+/** Full naira with commas: 28796000 -> "₦28,796,000". */
+export function formatNaira(naira: number): string {
+  return `₦${Math.round(naira).toLocaleString("en-US")}`;
 }
 
 /** Final customer-facing figures for a car. Never includes costs, FX rate or margin. */
@@ -74,10 +83,11 @@ export function quote(
   const deposit = depositNgn(price, pct);
   return {
     stock_type: inStock ? "in_stock" : "pre_order",
+    price_basis: inStock ? "on_ground_lagos" : "to_your_doorstep",
     price_ngn: price,
     price_display: formatMillions(price),
     deposit_pct: Math.round(pct * 10_000) / 100,
     deposit_ngn: deposit,
-    deposit_display: formatMillions(deposit),
+    deposit_display: formatNaira(deposit),
   };
 }

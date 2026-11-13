@@ -7,7 +7,7 @@ const HEADER =
     ", ",
   );
 
-const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48 };
+const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0 };
 
 const inStock = (id: string, make: string, model: string, year: number, trim: string, colour: string, interior: string, price: number, reservation = "available") =>
   [id, make, model, year, trim, colour, interior, "30,000", "in_stock", price, "Lagos", "", "", "", "", "", "", "", "", "", "", "", reservation];

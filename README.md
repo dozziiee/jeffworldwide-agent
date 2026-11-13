@@ -1,11 +1,12 @@
 # Jeffworldwide MCP server
 
-A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord AI teammate three tools for selling Jeffworldwide's cars. Chord is the MCP client. The "Jeffworldwide inventory" Google Sheet is the only data store, and Paystack takes the deposits.
+A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord AI teammate four tools for selling Jeffworldwide's cars. Chord is the MCP client. The "Jeffworldwide inventory" Google Sheet is the only data store, and Paystack takes the deposits.
 
 | Tool | What it does | `status` values |
 | --- | --- | --- |
 | `search_inventory` | Free-text and filtered search over cars that are not reserved. Returns up to 5, with final naira price and deposit. | `ok`, `no_match`, `summary` |
 | `create_reservation` | Creates a Paystack deposit link and marks the car `pending_payment`. | `link_created`, `car_not_found`, `car_unavailable`, `payment_init_failed`, `invalid_input` |
+| `compare_market_price` | Compares one car's price with market asking prices from the Market tab. | `ok`, `no_comparison`, `car_not_found`, `invalid_input` |
 | `confirm_reservation` | Verifies the payment and marks the car `reserved`, or releases it. | `reserved`, `amount_mismatch`, `failed`, `abandoned`, `pending`, `reference_not_found`, `car_unavailable` |
 
 Every tool returns a JSON object with a `status` and, when something went wrong, a short `message`. Any tool can also return `service_unavailable` (Paystack or Google down, timing out after 10 seconds, or misconfigured) or `error` (unexpected failure). Raw errors never reach the client.
@@ -22,7 +23,8 @@ Customers only ever see final naira figures. Cost columns, the FX rate and the m
 ```
 src/pricing.ts   X.9 rounding, pre-order price, deposit, "59.9m" formatting (pure functions)
 src/search.ts    query normalisation, matching, ordering and result shaping (pure functions)
-src/sheets.ts    Google Sheets read/write, row parsing and the Logs tab
+src/market.ts    market price comparison (pure function)
+src/sheets.ts    Google Sheets read/write, row parsing, the Logs tab and the Market tab
 src/paystack.ts  Paystack initialize and verify
 src/tools.ts     the three tools, logging and error handling
 src/app.ts       Express app: auth, /mcp, /health
@@ -52,7 +54,7 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 - `reservation_status`: `available`, `pending_payment` or `reserved`. Blank counts as `available`.
 - Rows that cannot be parsed (no `car_id`, unknown status, missing price or costs) are skipped and logged.
 
-**Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock`. Percentages can be written as `0.3`, `30` or `30%`. Settings are read fresh on every tool call.
+**Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock, doorstep_delivery_ngn`. `doorstep_delivery_ngn` is optional: if the row is missing it counts as 0 and a warning is logged. Percentages can be written as `0.3`, `30` or `30%`. Settings are read fresh on every tool call.
 
 ## Search
 
@@ -67,6 +69,17 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 - `no_match` includes `unmatched_terms`: the words that matched no car at all.
 - With no search words and no filters, the status is `summary`: counts of available cars by make and model (`by_make`) and no car list. The tool never returns "the first five rows".
 
+## Market comparison
+
+`compare_market_price` takes a `car_id` and compares Jeff's price with rows in a **Market** tab, which is created with its header row if missing.
+
+Columns: `make, model, year, condition, low_ngn, high_ngn, listings_count, source_url, collected_on`.
+
+- Rows match on the same make and model and the same year. If there is none for that year, the nearest year within one is used (one year older first, then one year newer) and the response says so (`exact_year_match: false` plus a `message`).
+- Several rows for the same year are combined: lowest low, highest high, listings added up, and the `source_url` and `collected_on` of the most recent row.
+- The response gives Jeff's price and `price_basis`, the market low and high, `difference_vs_low_ngn` (Jeff's price minus the market low), and a note that Jiji figures are asking prices for cars on ground, usually negotiable.
+- No comparable rows → `no_comparison`. Unknown car → `car_not_found`.
+
 ## Logs tab
 
 Every tool call is appended to a **Logs** tab in the sheet, because Vercel's free plan keeps logs for only a short time. The tab and its header row are created automatically if missing.
@@ -76,8 +89,10 @@ Columns: `timestamp_utc, tool, inputs_json, status, total_matches, reference, du
 ## Pricing
 
 - In stock: `price_ngn` from the sheet.
-- Pre-order: `(auction + fees + ground + ocean + clearing) × fx_rate × (1 + margin_pct)`, then the X.9 rule in millions of naira: up to `f + 0.9` → `f + 0.9`; up to `f + 0.99` → `f + 0.99`; otherwise `f + 1.9`. So 57.3 → 57.9, 57.95 → 57.99, 57.995 → 58.9.
+- Pre-order: `(auction + fees + ground + ocean + clearing) × fx_rate × (1 + margin_pct) + doorstep_delivery_ngn`, then the X.9 rule in millions of naira: up to `f + 0.9` → `f + 0.9`; up to `f + 0.99` → `f + 0.99`; otherwise `f + 1.9`. So 57.3 → 57.9, 57.95 → 57.99, 57.995 → 58.9.
 - Deposit: price × the deposit percentage for that stock type, rounded to the nearest naira.
+- Every car carries `price_basis`: `to_your_doorstep` for pre-orders (delivery is in the price) and `on_ground_lagos` for in-stock cars.
+- `price_display` is in Jeff's style (`59.9m`); `deposit_display` is full naira with commas (`₦28,796,000`).
 - The price and deposit are computed when the reservation is created and stored in the Paystack metadata, so later FX changes do not affect a payment already in flight.
 
 ## Run locally

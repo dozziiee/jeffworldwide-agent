@@ -2,13 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ServiceUnavailable } from "./http";
 import * as paystack from "./paystack";
 import * as sheets from "./sheets";
-import { confirmReservation, createReservation, maskEmails, runTool, searchInventory } from "./tools";
+import { compareMarketPrice, confirmReservation, createReservation, maskEmails, runTool, searchInventory } from "./tools";
 
 vi.mock("./paystack");
 vi.mock("./sheets", async (importOriginal) => ({
   ...(await importOriginal<typeof sheets>()),
   loadSheet: vi.fn(),
   writeReservation: vi.fn(),
+  loadMarket: vi.fn(),
   appendLog: vi.fn(),
 }));
 
@@ -17,7 +18,7 @@ const HEADER =
     ", ",
   );
 
-const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48 };
+const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0 };
 
 function sheetWith(reservation: { ref?: string; status?: string } = {}) {
   const rows = [
@@ -51,11 +52,12 @@ describe("search_inventory", () => {
         interior: "Red",
         mileage: "45,000",
         stock_type: "in_stock",
+        price_basis: "on_ground_lagos",
         price_ngn: 59_900_000,
         price_display: "59.9m",
         deposit_pct: 30,
         deposit_ngn: 17_970_000,
-        deposit_display: "17.97m",
+        deposit_display: "₦17,970,000",
         location: "Lagos",
         highlights: "Pano roof",
       },
@@ -71,7 +73,7 @@ describe("create_reservation", () => {
   it("creates a link and marks the row pending_payment", async () => {
     vi.mocked(paystack.initializeTransaction).mockResolvedValue({ ok: true, payment_url: "https://pay/abc" });
     const res = await createReservation(input);
-    expect(res).toMatchObject({ status: "link_created", payment_url: "https://pay/abc", deposit_ngn: 17_970_000, deposit_display: "17.97m", price_display: "59.9m" });
+    expect(res).toMatchObject({ status: "link_created", payment_url: "https://pay/abc", deposit_ngn: 17_970_000, deposit_display: "₦17,970,000", price_display: "59.9m" });
     expect(res.reference).toMatch(/^JW-013-\d{13}$/);
     expect(vi.mocked(paystack.initializeTransaction).mock.calls[0][0]).toMatchObject({
       email: "ada@example.com",
@@ -164,6 +166,70 @@ describe("confirm_reservation", () => {
     expect((await confirmReservation({ reference: ref })).status).toBe("pending");
     vi.mocked(paystack.verifyTransaction).mockResolvedValue({ found: false });
     expect((await confirmReservation({ reference: ref })).status).toBe("reference_not_found");
+  });
+});
+
+describe("compare_market_price", () => {
+  const MARKET = [
+    sheets.MARKET_HEADERS,
+    ["Mercedes-Benz", "GLC 43", 2018, "Foreign used", "52,000,000", "68,000,000", 9, "https://jiji.ng/glc43-2018", "2026-11-10"],
+    ["Mercedes-Benz", "GLC 43", 2018, "Nigerian used", "45,000,000", "58,000,000", 4, "https://jiji.ng/glc43-2018-local", "2026-11-12"],
+    ["Toyota", "Camry", 2019, "Foreign used", "30,000,000", "36,000,000", 12, "https://jiji.ng/camry-2019", "2026-11-11"],
+    ["Toyota", "Camry", 2021, "Foreign used", "40,000,000", "47,000,000", 6, "https://jiji.ng/camry-2021", "2026-11-11"],
+    ["Toyota", "Camry", 2016, "Foreign used", "18,000,000", "22,000,000", 20, "https://jiji.ng/camry-2016", "2026-11-11"],
+    ["Honda", "Accord", "", "Foreign used", "x", "y", 1, "", ""], // malformed, skipped
+  ];
+  beforeEach(() => vi.mocked(sheets.loadMarket).mockResolvedValue(sheets.parseMarket(MARKET)));
+
+  it("exact year match: combines the rows for that year", async () => {
+    expect(await compareMarketPrice({ car_id: "JW-013" })).toEqual({
+      status: "ok",
+      car_id: "JW-013",
+      title: "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC",
+      jeff_price_ngn: 59_900_000,
+      jeff_price_display: "59.9m",
+      price_basis: "on_ground_lagos",
+      market_low_ngn: 45_000_000,
+      market_high_ngn: 68_000_000,
+      market_low_display: "45m",
+      market_high_display: "68m",
+      listings_count: 13,
+      year_matched: 2018,
+      exact_year_match: true,
+      collected_on: "2026-11-12",
+      source_url: "https://jiji.ng/glc43-2018-local",
+      difference_vs_low_ngn: 14_900_000,
+      note: "Jiji figures are asking prices for cars on ground, usually negotiable.",
+    });
+  });
+
+  it("no row for the year: uses the nearest year within one and says so", async () => {
+    // JW-014 is a 2020 Camry pre-order at 56.99m; Market has 2019 and 2021 (and 2016, too far).
+    const res = await compareMarketPrice({ car_id: "jw-014" });
+    expect(res).toMatchObject({
+      status: "ok",
+      car_id: "JW-014",
+      price_basis: "to_your_doorstep",
+      jeff_price_ngn: 56_990_000,
+      year_matched: 2019,
+      exact_year_match: false,
+      market_low_ngn: 30_000_000,
+      market_high_ngn: 36_000_000,
+      listings_count: 12,
+      difference_vs_low_ngn: 26_990_000,
+    });
+    expect(res.message).toContain("2019");
+  });
+
+  it("no comparable rows: no_comparison", async () => {
+    vi.mocked(sheets.loadMarket).mockResolvedValue(sheets.parseMarket(MARKET.filter((r) => r[2] !== 2019 && r[2] !== 2021)));
+    expect(await compareMarketPrice({ car_id: "JW-014" })).toMatchObject({ status: "no_comparison", car_id: "JW-014", jeff_price_display: "56.99m" });
+    vi.mocked(sheets.loadMarket).mockResolvedValue([]);
+    expect((await compareMarketPrice({ car_id: "JW-013" })).status).toBe("no_comparison");
+  });
+
+  it("unknown car_id: car_not_found", async () => {
+    expect(await compareMarketPrice({ car_id: "JW-999" })).toEqual({ status: "car_not_found", message: "No car with id JW-999." });
   });
 });
 

@@ -50,7 +50,14 @@ export function toFraction(cell: unknown): number {
 
 export function parseSettings(rows: unknown[][]): Settings {
   const map = new Map(rows.map((r) => [String(r[0] ?? "").trim().toLowerCase(), r[1]]));
+  // Optional: a missing or invalid doorstep fee counts as 0.
+  let doorstepDeliveryNgn = toNumber(map.get("doorstep_delivery_ngn"));
+  if (!Number.isFinite(doorstepDeliveryNgn) || doorstepDeliveryNgn < 0) {
+    console.warn("[sheet] Settings tab has no valid doorstep_delivery_ngn row; using 0");
+    doorstepDeliveryNgn = 0;
+  }
   const settings: Settings = {
+    doorstepDeliveryNgn,
     fxRateNgnPerUsd: toNumber(map.get("fx_rate_ngn_per_usd")),
     marginPct: toFraction(map.get("margin_pct")),
     depositPctInStock: toFraction(map.get("deposit_pct_in_stock")),
@@ -239,34 +246,100 @@ export const LOG_HEADERS = [
   "error_message",
 ];
 
-let logsTabReady = false; // checked once per server instance
-
-/** Creates the Logs tab and its header row if either is missing. */
-async function ensureLogsTab(): Promise<void> {
-  let header: unknown[] | undefined;
+/** Reads a tab, creating the tab and its header row if either is missing. */
+async function readOrCreateTab(title: string, headers: string[], range = title): Promise<unknown[][]> {
+  let rows: unknown[][] = [];
   try {
-    header = (await sheetsRequest("values/Logs!A1:H1")).values?.[0];
+    rows = (await sheetsRequest(`values/${range}`)).values ?? [];
   } catch {
     // Reading failed, most likely because the tab does not exist yet.
     await sheetsRequest(":batchUpdate", {
       method: "POST",
-      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Logs" } } }] }),
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
     });
   }
-  if (!header?.length) {
-    await sheetsRequest("values/Logs!A1:H1?valueInputOption=RAW", {
+  if (!rows[0]?.length) {
+    await sheetsRequest(`values/${title}!A1?valueInputOption=RAW`, {
       method: "PUT",
-      body: JSON.stringify({ values: [LOG_HEADERS] }),
+      body: JSON.stringify({ values: [headers] }),
     });
   }
-  logsTabReady = true;
+  return rows;
 }
+
+let logsTabReady = false; // checked once per server instance
 
 /** Appends one row to the Logs tab. Values are written as plain text, never as formulas. */
 export async function appendLog(row: (string | number)[]): Promise<void> {
-  if (!logsTabReady) await ensureLogsTab();
+  if (!logsTabReady) {
+    await readOrCreateTab("Logs", LOG_HEADERS, "Logs!A1:H1");
+    logsTabReady = true;
+  }
   await sheetsRequest("values/Logs!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS", {
     method: "POST",
     body: JSON.stringify({ values: [row] }),
   });
+}
+
+// ---------- Market tab ----------
+
+export const MARKET_HEADERS = [
+  "make",
+  "model",
+  "year",
+  "condition",
+  "low_ngn",
+  "high_ngn",
+  "listings_count",
+  "source_url",
+  "collected_on",
+];
+
+export type MarketRow = {
+  make: string;
+  model: string;
+  year: number;
+  condition: string;
+  low_ngn: number;
+  high_ngn: number;
+  listings_count: number;
+  source_url: string;
+  collected_on: string;
+};
+
+/** Parses the Market tab. Rows without make, model, year or a usable price range are skipped and logged. */
+export function parseMarket(rows: unknown[][]): MarketRow[] {
+  const [header = [], ...data] = rows;
+  const columns: Record<string, number> = {};
+  header.forEach((name, i) => (columns[String(name).trim().toLowerCase()] = i));
+
+  const market: MarketRow[] = [];
+  data.forEach((cells, i) => {
+    if (!cells || cells.every((c) => String(c ?? "").trim() === "")) return; // blank line
+    const get = (name: string) => String(cells[columns[name]] ?? "").trim();
+    const year = toNumber(get("year"));
+    const low = toNumber(get("low_ngn"));
+    const high = toNumber(get("high_ngn"));
+    if (!get("make") || !get("model") || !Number.isInteger(year) || !(low > 0) || !(high >= low)) {
+      console.warn(`[sheet] skipping Market row ${i + 2}: missing make, model, year or price range`);
+      return;
+    }
+    market.push({
+      make: get("make"),
+      model: get("model"),
+      year,
+      condition: get("condition"),
+      low_ngn: low,
+      high_ngn: high,
+      listings_count: toNumber(get("listings_count")) || 0,
+      source_url: get("source_url"),
+      collected_on: get("collected_on"),
+    });
+  });
+  return market;
+}
+
+/** Reads the Market tab fresh, creating it with headers if it does not exist. */
+export async function loadMarket(): Promise<MarketRow[]> {
+  return parseMarket(await readOrCreateTab("Market", MARKET_HEADERS));
 }
