@@ -2,13 +2,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ServiceUnavailable } from "./http";
 import * as paystack from "./paystack";
 import * as sheets from "./sheets";
-import { confirmReservation, createReservation, runTool, searchInventory } from "./tools";
+import { confirmReservation, createReservation, maskEmails, runTool, searchInventory } from "./tools";
 
 vi.mock("./paystack");
 vi.mock("./sheets", async (importOriginal) => ({
   ...(await importOriginal<typeof sheets>()),
   loadSheet: vi.fn(),
   writeReservation: vi.fn(),
+  appendLog: vi.fn(),
 }));
 
 const HEADER =
@@ -39,12 +40,9 @@ beforeEach(() => {
 });
 
 describe("search_inventory", () => {
-  it("matches free text, skips reserved and malformed rows, hides cost data", async () => {
-    const all = await searchInventory({});
-    expect(all.status).toBe("ok");
-    expect((all.results as any[]).map((c) => c.car_id)).toEqual(["JW-013", "JW-014"]);
-
+  it("reads the sheet and searches it, skipping reserved and malformed rows", async () => {
     const res = await searchInventory({ query: "white glc 43" });
+    expect(res).toMatchObject({ status: "ok", total_matches: 1, returned: 1, truncated: false });
     expect(res.results).toEqual([
       {
         car_id: "JW-013",
@@ -62,18 +60,8 @@ describe("search_inventory", () => {
         highlights: "Pano roof",
       },
     ]);
-  });
-
-  it("adds shipping fields for pre-orders and never leaks costs, FX or margin", async () => {
-    const res = await searchInventory({ stock_type: "pre_order" });
-    const [car] = res.results as any[];
-    expect(car).toMatchObject({ car_id: "JW-014", status: "on_water", shipping_type: "RoRo", price_display: "56.99m" });
-    expect(JSON.stringify(res)).not.toMatch(/usd|fx|margin|1500|20000/i);
-  });
-
-  it("filters by price and returns no_match with an empty list", async () => {
-    expect((await searchInventory({ max_price_ngn: 57_000_000 })).results).toHaveLength(1);
-    expect(await searchInventory({ query: "ferrari" })).toMatchObject({ status: "no_match", results: [] });
+    // JW-015 is reserved and JW-016 is malformed, so neither counts.
+    expect(await searchInventory({})).toMatchObject({ status: "summary", total_matches: 2 });
   });
 });
 
@@ -196,5 +184,48 @@ describe("runTool", () => {
     });
     expect(out.structuredContent.status).toBe("error");
     expect(out.structuredContent.message).not.toContain("boom");
+  });
+
+  it("writes each call to the Logs tab with the email masked", async () => {
+    await runTool("create_reservation", { car_id: "JW-013", customer_name: "Ada", customer_email: "dozie@gmail.com" }, async () => ({
+      status: "link_created",
+      reference: "JW-013-1",
+    }));
+    await runTool("search_inventory", { query: "honda" }, async () => ({ status: "ok", total_matches: 4 }));
+    const [first, second] = vi.mocked(sheets.appendLog).mock.calls.map(([row]) => row);
+    expect(first[0]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    expect(first.slice(1, 6)).toEqual([
+      "create_reservation",
+      '{"car_id":"JW-013","customer_name":"Ada","customer_email":"d***@gmail.com"}',
+      "link_created",
+      "",
+      "JW-013-1",
+    ]);
+    expect(typeof first[6]).toBe("number");
+    expect(second.slice(1, 6)).toEqual(["search_inventory", '{"query":"honda"}', "ok", 4, ""]);
+    expect(JSON.stringify([first, second])).not.toContain("dozie@");
+  });
+
+  it("records the error message, and the reference being confirmed", async () => {
+    await runTool("confirm_reservation", { reference: "JW-013-9" }, async () => {
+      throw new ServiceUnavailable("Paystack is unreachable or timed out");
+    });
+    const [row] = vi.mocked(sheets.appendLog).mock.calls[0];
+    expect(row.slice(3)).toEqual(["service_unavailable", "", "JW-013-9", expect.any(Number), "Paystack is unreachable or timed out"]);
+  });
+
+  it("still returns the tool result when the Logs tab write fails", async () => {
+    vi.mocked(sheets.appendLog).mockRejectedValue(new Error("sheet down"));
+    const out = await runTool("search_inventory", { query: "honda" }, async () => ({ status: "ok", total_matches: 1 }));
+    expect(out.structuredContent).toEqual({ status: "ok", total_matches: 1 });
+    expect(vi.mocked(console.error).mock.calls.flat().join(" ")).toContain("sheet down");
+  });
+
+  it("masks emails anywhere in the inputs", () => {
+    expect(maskEmails({ customer_email: "dozie@gmail.com", query: "send to a.b@jeff.co.uk pls", n: 5 })).toEqual({
+      customer_email: "d***@gmail.com",
+      query: "send to a***@jeff.co.uk pls",
+      n: 5,
+    });
   });
 });

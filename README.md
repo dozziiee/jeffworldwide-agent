@@ -4,7 +4,7 @@ A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord 
 
 | Tool | What it does | `status` values |
 | --- | --- | --- |
-| `search_inventory` | Finds up to 5 cars that are not reserved, with final naira price and deposit. | `ok`, `no_match` |
+| `search_inventory` | Free-text and filtered search over cars that are not reserved. Returns up to 5, with final naira price and deposit. | `ok`, `no_match`, `summary` |
 | `create_reservation` | Creates a Paystack deposit link and marks the car `pending_payment`. | `link_created`, `car_not_found`, `car_unavailable`, `payment_init_failed`, `invalid_input` |
 | `confirm_reservation` | Verifies the payment and marks the car `reserved`, or releases it. | `reserved`, `amount_mismatch`, `failed`, `abandoned`, `pending`, `reference_not_found`, `car_unavailable` |
 
@@ -21,7 +21,8 @@ Customers only ever see final naira figures. Cost columns, the FX rate and the m
 
 ```
 src/pricing.ts   X.9 rounding, pre-order price, deposit, "59.9m" formatting (pure functions)
-src/sheets.ts    Google Sheets read/write and row parsing
+src/search.ts    query normalisation, matching, ordering and result shaping (pure functions)
+src/sheets.ts    Google Sheets read/write, row parsing and the Logs tab
 src/paystack.ts  Paystack initialize and verify
 src/tools.ts     the three tools, logging and error handling
 src/app.ts       Express app: auth, /mcp, /health
@@ -52,6 +53,25 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 - Rows that cannot be parsed (no `car_id`, unknown status, missing price or costs) are skipped and logged.
 
 **Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock`. Percentages can be written as `0.3`, `30` or `30%`. Settings are read fresh on every tool call.
+
+## Search
+
+`search_inventory` takes free text plus optional filters (`make`, `model`, `year`, `max_price_ngn`, `stock_type`); everything combines with AND.
+
+- The query is lowercased, punctuation is stripped, and filler words are dropped, English and Pidgin ("how far that honda still dey" becomes `honda`).
+- Aliases: `benz`, `merc`, `mercedes` → Mercedes-Benz; `lambo` → Lamborghini; `cyber truck` → Cybertruck; `g wagon`, `g-wagon` → G 63 AMG.
+- A car matches when every remaining word is found in at least one of make, model, trim, colour, interior or year (substring, case-insensitive). So `gle` matches "GLE 450" and "GLE 63 S AMG".
+- Reserved cars are excluded. Results are ordered with exact model matches first, then cheapest first.
+- Every response has `status`, `total_matches`, `returned`, `truncated` and `results` (at most 5).
+- `truncated: true` means more than 5 cars matched; `refine_options` then lists the distinct `model`, `year` and `stock_type` values among all matches, with counts, so the agent can ask the buyer to narrow down.
+- `no_match` includes `unmatched_terms`: the words that matched no car at all.
+- With no search words and no filters, the status is `summary`: counts of available cars by make and model (`by_make`) and no car list. The tool never returns "the first five rows".
+
+## Logs tab
+
+Every tool call is appended to a **Logs** tab in the sheet, because Vercel's free plan keeps logs for only a short time. The tab and its header row are created automatically if missing.
+
+Columns: `timestamp_utc, tool, inputs_json, status, total_matches, reference, duration_ms, error_message`. Emails in the inputs are masked (`d***@gmail.com`). If the write fails, the failure goes to the console and the tool call carries on.
 
 ## Pricing
 
@@ -108,7 +128,7 @@ In the Inspector: choose transport **Streamable HTTP**, set the URL to `http://l
 - `confirm_reservation` only releases a row (failed or abandoned payment) if the row still carries that same reference, so an old link cannot undo a newer payment. If a payment succeeds for a car that was meanwhile reserved under another reference, it returns `car_unavailable` with a message that the deposit needs a refund.
 - `held_until` is counted from Paystack's payment time, so calling `confirm_reservation` twice gives the same answer.
 - There is no locking: the sheet is read, then written. Two reservations for the same car in the same second could both get a link; `confirm_reservation` then reserves for the first to pay.
-- Logs go to the console (Vercel → Logs): tool name, inputs without the email, outcome and duration.
+- Logs go to the console (Vercel → Logs: tool name, inputs without the email, outcome and duration) and to the Logs tab in the sheet.
 
 ## Field notes from live testing (Paystack test mode, 12 Nov 2026)
 

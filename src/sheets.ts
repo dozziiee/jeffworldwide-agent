@@ -184,7 +184,9 @@ async function accessToken(): Promise<string> {
 
 async function sheetsRequest(path: string, init: RequestInit = {}): Promise<any> {
   const token = await accessToken();
-  const res = await requestJson("Google Sheets", `${API}/${requireEnv("GOOGLE_SHEET_ID")}/${path}`, {
+  // Paths like "values/..." hang off the spreadsheet; ":batchUpdate" is an action on it.
+  const separator = path.startsWith(":") ? "" : "/";
+  const res = await requestJson("Google Sheets", `${API}/${requireEnv("GOOGLE_SHEET_ID")}${separator}${path}`, {
     ...init,
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
   });
@@ -221,5 +223,50 @@ export async function writeReservation(sheet: Sheet, car: Car, ref: string, stat
         { range: cell("reservation_status"), values: [[status]] },
       ],
     }),
+  });
+}
+
+// ---------- Logs tab ----------
+
+export const LOG_HEADERS = [
+  "timestamp_utc",
+  "tool",
+  "inputs_json",
+  "status",
+  "total_matches",
+  "reference",
+  "duration_ms",
+  "error_message",
+];
+
+let logsTabReady = false; // checked once per server instance
+
+/** Creates the Logs tab and its header row if either is missing. */
+async function ensureLogsTab(): Promise<void> {
+  let header: unknown[] | undefined;
+  try {
+    header = (await sheetsRequest("values/Logs!A1:H1")).values?.[0];
+  } catch {
+    // Reading failed, most likely because the tab does not exist yet.
+    await sheetsRequest(":batchUpdate", {
+      method: "POST",
+      body: JSON.stringify({ requests: [{ addSheet: { properties: { title: "Logs" } } }] }),
+    });
+  }
+  if (!header?.length) {
+    await sheetsRequest("values/Logs!A1:H1?valueInputOption=RAW", {
+      method: "PUT",
+      body: JSON.stringify({ values: [LOG_HEADERS] }),
+    });
+  }
+  logsTabReady = true;
+}
+
+/** Appends one row to the Logs tab. Values are written as plain text, never as formulas. */
+export async function appendLog(row: (string | number)[]): Promise<void> {
+  if (!logsTabReady) await ensureLogsTab();
+  await sheetsRequest("values/Logs!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS", {
+    method: "POST",
+    body: JSON.stringify({ values: [row] }),
   });
 }

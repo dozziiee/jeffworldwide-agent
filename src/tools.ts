@@ -4,15 +4,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { ServiceUnavailable } from "./http";
 import { initializeTransaction, verifyTransaction } from "./paystack";
-import { quote, type Quote } from "./pricing";
-import { loadSheet, writeReservation, type Car } from "./sheets";
+import { quote } from "./pricing";
+import { searchCars, title, type SearchInput } from "./search";
+import { appendLog, loadSheet, writeReservation, type Car } from "./sheets";
 
 export type ToolResult = { status: string; message?: string; [key: string]: unknown };
 
 const PENDING_HOLD_MS = 30 * 60 * 1000;
-const MAX_RESULTS = 5;
-
-const title = (car: Car) => [car.year, car.make, car.model, car.trim].filter(Boolean).join(" ");
 
 const findCar = (cars: Car[], carId: unknown) =>
   cars.find((c) => c.car_id.toLowerCase() === String(carId ?? "").trim().toLowerCase());
@@ -20,68 +18,11 @@ const findCar = (cars: Car[], carId: unknown) =>
 /** "JW-013-1731400000000" -> 1731400000000 (NaN if the reference has no timestamp). */
 const referenceTime = (ref: string) => Number(ref.split("-").pop());
 
-function carView(car: Car, q: Quote) {
-  return {
-    car_id: car.car_id,
-    title: title(car),
-    colour: car.colour,
-    interior: car.interior,
-    mileage: car.mileage,
-    ...q,
-    location: car.location,
-    highlights: car.highlights,
-    ...(q.stock_type === "pre_order" && {
-      status: car.status,
-      shipping_type: car.shipping_type,
-      origin_port: car.origin_port,
-      destination_port: car.destination_port,
-      expected_berth: car.expected_berth,
-    }),
-  };
-}
-
 // ---------- 1. search_inventory ----------
-
-export type SearchInput = {
-  query?: string;
-  make?: string;
-  model?: string;
-  year?: number | string;
-  max_price_ngn?: number | string;
-  stock_type?: string;
-};
 
 export async function searchInventory(input: SearchInput): Promise<ToolResult> {
   const { cars, settings } = await loadSheet();
-
-  const lower = (v: unknown) => String(v ?? "").trim().toLowerCase();
-  const tokens = lower(input.query).split(/\s+/).filter(Boolean);
-  const make = lower(input.make);
-  const model = lower(input.model);
-  const year = Number(input.year) || null;
-  const maxPrice = Number(input.max_price_ngn) || null;
-  const stockType = lower(input.stock_type);
-
-  const results = [];
-  for (const car of cars) {
-    if (car.reservation_status === "reserved") continue;
-    if (make && !car.make.toLowerCase().includes(make)) continue;
-    if (model && !car.model.toLowerCase().includes(model)) continue;
-    if (year && car.year !== year) continue;
-    const haystack = `${car.make} ${car.model} ${car.trim} ${car.colour} ${car.year}`.toLowerCase();
-    if (!tokens.every((t) => haystack.includes(t))) continue;
-
-    const q = quote(car, settings);
-    if (stockType && q.stock_type !== stockType) continue;
-    if (maxPrice && q.price_ngn > maxPrice) continue;
-
-    results.push(carView(car, q));
-    if (results.length === MAX_RESULTS) break;
-  }
-
-  return results.length
-    ? { status: "ok", results }
-    : { status: "no_match", message: "No available cars match that search.", results: [] };
+  return searchCars(cars, settings, input);
 }
 
 // ---------- 2. create_reservation ----------
@@ -200,24 +141,56 @@ export async function confirmReservation(input: { reference: string }): Promise<
 
 // ---------- wiring ----------
 
-/** Runs a tool, logs it (never the email), and turns any error into a status. */
+/** "dozie@gmail.com" -> "d***@gmail.com", anywhere inside the inputs. */
+export function maskEmails<T>(value: T): T {
+  if (typeof value === "string") {
+    return value.replace(/([^\s@])[^\s@]*(@[^\s@]+\.[^\s@]+)/g, "$1***$2") as T;
+  }
+  if (Array.isArray(value)) return value.map(maskEmails) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, maskEmails(v)])) as T;
+  }
+  return value;
+}
+
+/** Runs a tool, logs it to the console and the Logs tab, and turns any error into a status. */
 export async function runTool(name: string, input: Record<string, unknown>, fn: () => Promise<ToolResult>) {
   const started = Date.now();
   let result: ToolResult;
+  let errorMessage = "";
   try {
     result = await fn();
+    if (result.status === "payment_init_failed" || result.status === "invalid_input") errorMessage = result.message ?? "";
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    errorMessage = err instanceof Error ? err.message : String(err);
     result =
       err instanceof ServiceUnavailable
-        ? { status: "service_unavailable", message }
+        ? { status: "service_unavailable", message: errorMessage }
         : { status: "error", message: "Something went wrong handling this request." };
-    console.error(`[tool] ${name} error: ${message}`);
+    console.error(`[tool] ${name} error: ${errorMessage}`);
   }
+  const duration = Date.now() - started;
+
+  // Console: no email at all. Logs tab: email masked.
   const { customer_email: _omit, ...loggable } = input;
-  console.log(
-    `[tool] ${JSON.stringify({ tool: name, inputs: loggable, outcome: result.status, duration_ms: Date.now() - started })}`,
-  );
+  console.log(`[tool] ${JSON.stringify({ tool: name, inputs: loggable, outcome: result.status, duration_ms: duration })}`);
+
+  // Persistent log. A failed write must never break the tool call.
+  try {
+    await appendLog([
+      new Date().toISOString(),
+      name,
+      JSON.stringify(maskEmails(input)),
+      result.status,
+      typeof result.total_matches === "number" ? result.total_matches : "",
+      String(result.reference ?? input.reference ?? ""),
+      duration,
+      errorMessage,
+    ]);
+  } catch (err) {
+    console.error(`[log] could not write to the Logs tab: ${err instanceof Error ? err.message : err}`);
+  }
+
   return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result };
 }
 
@@ -229,7 +202,7 @@ export function registerTools(server: McpServer) {
     "search_inventory",
     {
       description:
-        "Search Jeffworldwide's cars that are not yet reserved. All inputs are optional. Returns up to 5 cars with final naira price and deposit. status: ok | no_match | service_unavailable.",
+        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
       inputSchema: {
         query: z.string().optional().describe('Free text, e.g. "white GLC 43"'),
         make: z.string().optional(),
