@@ -423,7 +423,7 @@ describe("request_callback: reference, payment disputes and the team alert", () 
     expect(sheets.writeReservation).not.toHaveBeenCalled();
   });
 
-  it("alerts the team after logging, with the request as JSON fields", async () => {
+  it("alerts the team after logging, with the request details", async () => {
     const order: string[] = [];
     vi.mocked(sheets.appendRequest).mockImplementation(async () => void order.push("logged"));
     vi.mocked(alerts.sendAlert).mockImplementation(async () => (order.push("alerted"), true));

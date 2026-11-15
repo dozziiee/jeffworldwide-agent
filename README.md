@@ -29,7 +29,7 @@ src/market.ts    market price comparison (pure function)
 src/sheets.ts    Google Sheets read/write, row parsing, and the Logs, Market, Photos and Requests tabs
 src/paystack.ts  Paystack initialize and verify
 src/tools.ts     the tools, logging and error handling
-src/alerts.ts    the Zapier team alert
+src/alerts.ts    the WhatsApp team alert, sent through Twilio
 src/app.ts       Express app: auth, /mcp, /health
 src/local.ts     local entry point
 api/index.ts     Vercel entry point
@@ -45,7 +45,11 @@ scripts/fetch-photos.ts   one-off script that fills the Photos tab from Wikimedi
 | `GOOGLE_SHEET_ID` | ID of the sheet (the long string in its URL). |
 | `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Service account email. Share the sheet with it as Editor. |
 | `GOOGLE_PRIVATE_KEY` | The service account's private key, with `\n` between lines. |
-| `ZAPIER_HOOK_URL` | Optional. Zapier webhook that `request_callback` posts each request to, to alert the team. |
+| `TWILIO_ACCOUNT_SID` | Twilio account SID, for the WhatsApp team alert. |
+| `TWILIO_AUTH_TOKEN` | Twilio auth token. |
+| `TWILIO_WHATSAPP_FROM` | The WhatsApp sender, for example `whatsapp:+14155238886`. |
+| `ALERT_WHATSAPP_TO` | The team's WhatsApp number that receives alerts, in the same format. |
+| `TWILIO_CONTENT_SID` | Optional. An approved WhatsApp template (`HX...`) with one variable, `{{1}}`. |
 
 Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commit secrets.
 
@@ -128,7 +132,18 @@ Two tools append rows to a **Requests** tab (created with headers if missing) fo
 - `request_photos` takes a `car_id` and records `request_type` "photos" with `status` "open"; `reason`, `note` and `reference` are left empty.
 - `request_callback` takes a `reason` (required, for example "negotiation", "viewing", "photos", "deposit paid", "refund", "payment dispute"), plus an optional `car_id`, `reference` (a payment reference) and `note` (for example the price the buyer wants), and records `request_type` "callback" with `status` "open". If no `car_id` is given, the car is worked out from the reference. If the car is not in the inventory the request is still recorded, without a title, so it is never lost.
 
-After the row is written, `request_callback` POSTs the request as JSON (`reason, car_id, title, reference, note, timestamp_utc`) to `ZAPIER_HOOK_URL`, with a 5-second timeout. If the variable is not set or the POST fails, a warning is logged and the tool still returns `requested`.
+### WhatsApp alert
+
+After the row is written, `request_callback` sends the team a WhatsApp message through the Twilio Messages API. The message is one line:
+
+`Active Desk | {reason} | {title} ({car_id}) | Ref {reference} | {note}`
+
+Empty parts are left out, line breaks are removed, and the line is cut to 250 characters.
+
+- If `TWILIO_CONTENT_SID` is set, the message is sent as that template, with the line as variable `{{1}}`. If Twilio rejects it, or the variable is not set, it is sent once more as a plain text message.
+- Each attempt has a 5-second timeout.
+- If the Twilio variables are missing or both sends fail, a warning is logged with Twilio's error code and the tool still returns `requested`.
+- WhatsApp only delivers plain text messages within 24 hours of the recipient last messaging the sender; outside that window an approved template is needed. Twilio accepting a message is not the same as WhatsApp delivering it: check the message log in the Twilio console if an alert does not arrive.
 
 ## Logs tab
 

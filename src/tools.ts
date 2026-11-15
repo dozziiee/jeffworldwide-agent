@@ -342,7 +342,7 @@ export async function requestCallback(input: CallbackInput): Promise<ToolResult>
   const carTitle = car ? title(car) : "";
   await appendRequest([timestamp, recordedCarId, carTitle, "callback", reason, note, "open", reference]);
 
-  // Alert the team. Best effort: a missing webhook or a failed POST never fails the request.
+  // Alert the team on WhatsApp. Best effort: missing settings or a failed send never fails the request.
   await sendAlert({ reason, car_id: recordedCarId, title: carTitle, reference, note, timestamp_utc: timestamp });
 
   return {
