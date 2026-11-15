@@ -11,8 +11,7 @@ import { normalise, searchCars, title, type SearchInput } from "./search";
 import {
   appendLog,
   appendRequest,
-  loadMarket,
-  loadPhotos,
+  loadData,
   loadSheet,
   toNumber,
   writeReservation,
@@ -40,13 +39,9 @@ const referenceTime = (ref: string) => Number(ref.split("-").pop());
 // ---------- 1. search_inventory ----------
 
 export async function searchInventory(input: SearchInput, baseUrl = ""): Promise<ToolResult> {
-  // A problem reading the Photos tab must not break the search; cars just come back without photos.
-  const photos = loadPhotos().catch((err) => {
-    console.warn(`[sheet] could not read the Photos tab: ${err instanceof Error ? err.message : err}`);
-    return [];
-  });
-  const { cars, settings } = await loadSheet();
-  return searchCars(cars, settings, input, await photos, baseUrl);
+  // Inventory, Settings and Photos come back in one request (or from the cache).
+  const { sheet, photos } = await loadData(["Photos"]);
+  return searchCars(sheet.cars, sheet.settings, input, photos, baseUrl);
 }
 
 // ---------- 2. create_reservation ----------
@@ -65,7 +60,8 @@ export async function createReservation(input: CreateInput): Promise<ToolResult>
     return { status: "invalid_input", message: "car_id, customer_name and a valid customer_email are required." };
   }
 
-  const sheet = await loadSheet();
+  // Reservations are decided on the sheet as it is now, never on a cached copy.
+  const sheet = await loadSheet({ fresh: true });
   const car = findCar(sheet.cars, input.car_id);
   if (!car) return { status: "car_not_found", message: `No car with id ${input.car_id}.` };
 
@@ -188,7 +184,7 @@ export async function confirmReservation(input: { reference?: string; car_id?: s
   // No reference given: use the one recorded on the car's row.
   let sheet: Sheet | undefined;
   if (!reference && carId) {
-    sheet = await loadSheet();
+    sheet = await loadSheet({ fresh: true });
     reference = findCar(sheet.cars, carId)?.reservation_ref ?? "";
   }
   if (!reference) {
@@ -225,7 +221,7 @@ async function settlePayment(reference: string, tx: VerifyResult & { found: true
     return { status: "amount_mismatch", message: "The amount paid does not match the deposit. Not reserved." };
   }
 
-  const sheet = loaded ?? (await loadSheet());
+  const sheet = loaded ?? (await loadSheet({ fresh: true }));
   const car = findCar(sheet.cars, tx.metadata.car_id);
   if (!car) return { status: "car_not_found", message: "The car for this payment is no longer in the sheet." };
   const ownsRow = car.reservation_ref === reference;
@@ -280,7 +276,7 @@ async function settlePayment(reference: string, tx: VerifyResult & { found: true
 export async function compareMarketPrice(input: { car_id: string }): Promise<ToolResult> {
   if (!String(input.car_id ?? "").trim()) return { status: "invalid_input", message: "car_id is required." };
 
-  const [sheet, market] = await Promise.all([loadSheet(), loadMarket()]);
+  const { sheet, market } = await loadData(["Market"]);
   const car = findCar(sheet.cars, input.car_id);
   if (!car) return { status: "car_not_found", message: `No car with id ${input.car_id}.` };
   return compareMarket(car, quote(car, sheet.settings), market);
@@ -321,7 +317,7 @@ export async function requestCallback(input: CallbackInput): Promise<ToolResult>
   let sheet: Sheet | undefined;
   let car: Car | undefined;
   if (carId || reference) {
-    sheet = await loadSheet();
+    sheet = await loadSheet({ fresh: true });
     car =
       (carId ? findCar(sheet.cars, carId) : undefined) ??
       (reference

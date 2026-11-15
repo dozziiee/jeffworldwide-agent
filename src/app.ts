@@ -7,7 +7,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { renderCarPage, renderMessagePage } from "./carPage";
 import { quote } from "./pricing";
 import { carPageUrl, findPhoto } from "./search";
-import { loadPhotos, loadSheet } from "./sheets";
+import { loadData, warmUp } from "./sheets";
 import { registerTools } from "./tools";
 
 const rpcError = (code: number, message: string) => ({ jsonrpc: "2.0", error: { code, message }, id: null });
@@ -26,8 +26,17 @@ function requireBearer(req: Request, res: Response, next: NextFunction) {
 export const app = express();
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/health", (_req, res) => {
-  res.type("text/plain").send("ok");
+// Health check that also warms the server: it signs in to Google and loads the cached tabs,
+// so the next tool call does not pay for that. Replies "ok" with the time taken.
+app.get("/health", async (_req, res) => {
+  const started = Date.now();
+  try {
+    await warmUp();
+    res.type("text/plain").send(`ok ${Date.now() - started}ms`);
+  } catch (err) {
+    console.error("[health] warm-up failed:", err instanceof Error ? err.message : err);
+    res.status(503).type("text/plain").send(`degraded ${Date.now() - started}ms: Google Sheets is not reachable`);
+  }
 });
 
 /** The public address of this server: PUBLIC_BASE_URL if set, otherwise worked out from the request. */
@@ -42,7 +51,7 @@ function publicBaseUrl(req: Request): string {
 app.get("/car/:car_id", async (req, res) => {
   const html = (status: number, body: string) => res.status(status).type("html").send(body);
   try {
-    const [sheet, photos] = await Promise.all([loadSheet(), loadPhotos().catch(() => [])]);
+    const { sheet, photos } = await loadData(["Photos"]);
     const wanted = String(req.params.car_id).trim().toLowerCase();
     const car = sheet.cars.find((c) => c.car_id.toLowerCase() === wanted);
     if (!car) {

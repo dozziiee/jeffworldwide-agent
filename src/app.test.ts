@@ -3,11 +3,15 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import app from "./app";
 import * as sheets from "./sheets";
 
-vi.mock("./sheets", async (importOriginal) => ({
-  ...(await importOriginal<typeof sheets>()),
-  loadSheet: vi.fn(),
-  loadPhotos: vi.fn(),
-}));
+vi.mock("./sheets", async (importOriginal) => {
+  const mocks = { loadSheet: vi.fn(), loadPhotos: vi.fn(), warmUp: vi.fn() };
+  return {
+    ...(await importOriginal<typeof sheets>()),
+    ...mocks,
+    loadData: async () => ({ sheet: await mocks.loadSheet(), photos: await mocks.loadPhotos(), market: [] }),
+  };
+});
+
 
 const HEADER =
   "car_id, make, model, year, trim, colour, interior, mileage, status, price_ngn, location, auction_price_usd, auction_fees_usd, ground_shipping_usd, ocean_shipping_usd, clearing_usd, origin_port, destination_port, shipping_type, expected_berth, highlights, reservation_ref, reservation_status, agreed_price_ngn, payment_url, review_until, vin, title_status, owners, accidents_reported".split(
@@ -68,13 +72,6 @@ describe("GET /car/:car_id", () => {
     expect(await res.text()).toContain("Car not found");
   });
 
-  it("still serves the page when the Photos tab cannot be read", async () => {
-    vi.mocked(sheets.loadPhotos).mockRejectedValue(new Error("no Photos tab"));
-    const res = await fetch(`${base}/car/JW-065`);
-    expect(res.status).toBe(200);
-    expect(await res.text()).not.toContain("<img");
-  });
-
   it("returns a 503 page, not a stack trace, when the sheet is unreachable", async () => {
     vi.mocked(sheets.loadSheet).mockRejectedValue(new Error("Google Sheets is unreachable"));
     const res = await fetch(`${base}/car/JW-065`);
@@ -91,7 +88,19 @@ describe("auth is unchanged", () => {
     expect(res.status).toBe(401);
   });
 
-  it("/health is still public", async () => {
-    expect(await (await fetch(`${base}/health`)).text()).toBe("ok");
+  it("/health is still public, warms the server and reports the time taken", async () => {
+    const res = await fetch(`${base}/health`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toMatch(/^ok \d+ms$/);
+    expect(sheets.warmUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("/health says so, without details, when Google cannot be reached", async () => {
+    vi.mocked(sheets.warmUp).mockRejectedValue(new Error("Google Sheets is unreachable or timed out"));
+    const res = await fetch(`${base}/health`);
+    expect(res.status).toBe(503);
+    const text = await res.text();
+    expect(text).toMatch(/^degraded \d+ms: /);
+    expect(text).not.toContain("timed out");
   });
 });

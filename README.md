@@ -18,7 +18,7 @@ Customers only ever see final naira figures. Cost columns, the FX rate and the m
 ## Endpoints
 
 - `POST /mcp`: MCP over Streamable HTTP, stateless. Requires `Authorization: Bearer <MCP_AUTH_TOKEN>`; anything else gets 401.
-- `GET /health`: returns `ok`.
+- `GET /health`: warms the server (signs in to Google and loads the cached tabs) and returns `ok` with the time taken, for example `ok 412ms`. Returns 503 if Google Sheets cannot be reached.
 - `GET /car/:car_id`: a public, mobile-friendly page for one car (no auth). Unknown IDs get a 404 page.
 
 ## Layout
@@ -70,7 +70,7 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 - The server adds and maintains three more columns after these: `agreed_price_ngn` (a negotiated price), `payment_url` (the Paystack link for a pending payment) and `review_until` (when a payment review hold ends).
 - Rows that cannot be parsed (no `car_id`, unknown status, missing price or costs) are skipped and logged.
 
-**Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock, doorstep_delivery_ngn, max_discount_ngn`. `doorstep_delivery_ngn` and `max_discount_ngn` are optional: if a row is missing it counts as 0 and a warning is logged. Percentages can be written as `0.3`, `30` or `30%`. Settings are read fresh on every tool call.
+**Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock, doorstep_delivery_ngn, max_discount_ngn`. `doorstep_delivery_ngn` and `max_discount_ngn` are optional: if a row is missing it counts as 0 and a warning is logged. Percentages can be written as `0.3`, `30` or `30%`. Settings are cached for 15 seconds, so a change in the sheet applies within that time.
 
 ## Search
 
@@ -84,6 +84,17 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 - `truncated: true` means more than 5 cars matched; `refine_options` then lists the distinct `model`, `year` and `stock_type` values among all matches, with counts, so the agent can ask the buyer to narrow down.
 - `no_match` includes `unmatched_terms`: the words that matched no car at all.
 - With no search words and no filters, the status is `summary`: counts of available cars by make and model (`by_make`) and no car list. The tool never returns "the first five rows".
+
+## Sheet access
+
+- **One request per tool call.** Every tab a tool needs is read in a single `batchGet`.
+- **One sign-in.** The Google token is fetched once per server instance and reused until it is about to expire.
+- **Cache.** Rows are kept in memory: Photos for 10 minutes; Inventory, Settings and Market for 15 seconds. Sheet edits therefore show up within 15 seconds.
+- **Writes clear the cache.** Any reservation write, payment review or request clears the Inventory cache immediately.
+- **Reservations never use the cache.** `create_reservation`, `confirm_reservation` and `request_callback` always read Inventory fresh, so availability is decided on the sheet as it is.
+- **Retry.** A timeout (10 seconds) or 5xx from Google is retried once before the tool returns `service_unavailable`. Appending a row is not repeated after a timeout, so a log or request row is never written twice.
+- **Tabs are created only when missing.** Market, Photos, Logs and Requests are created only when Google explicitly reports that the tab does not exist, never because a read failed. Inventory and Settings are never created.
+- **Warm-up.** Calling `GET /health` loads everything, so the next tool call needs no reads. Pointing an uptime monitor at it every few minutes keeps the server warm.
 
 ## Reservations
 

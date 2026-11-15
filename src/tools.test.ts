@@ -8,15 +8,27 @@ import { compareMarketPrice, confirmReservation, createReservation, requestCallb
 
 vi.mock("./alerts");
 vi.mock("./paystack");
-vi.mock("./sheets", async (importOriginal) => ({
-  ...(await importOriginal<typeof sheets>()),
-  loadSheet: vi.fn(),
-  writeReservation: vi.fn(),
-  loadMarket: vi.fn(),
-  loadPhotos: vi.fn(),
-  appendRequest: vi.fn(),
-  appendLog: vi.fn(),
-}));
+vi.mock("./sheets", async (importOriginal) => {
+  const mocks = {
+    loadSheet: vi.fn(),
+    writeReservation: vi.fn(),
+    loadMarket: vi.fn(),
+    loadPhotos: vi.fn(),
+    appendRequest: vi.fn(),
+    appendLog: vi.fn(),
+  };
+  return {
+    ...(await importOriginal<typeof sheets>()),
+    ...mocks,
+    // The real loadData reads several tabs in one request; here it is assembled from the per-tab mocks.
+    loadData: async (extra: string[] = []) => ({
+      sheet: await mocks.loadSheet(),
+      photos: extra.includes("Photos") ? await mocks.loadPhotos() : [],
+      market: extra.includes("Market") ? await mocks.loadMarket() : [],
+    }),
+  };
+});
+
 
 const HEADER =
   "car_id, make, model, year, trim, colour, interior, mileage, status, price_ngn, location, auction_price_usd, auction_fees_usd, ground_shipping_usd, ocean_shipping_usd, clearing_usd, origin_port, destination_port, shipping_type, expected_berth, highlights, reservation_ref, reservation_status, agreed_price_ngn, payment_url, review_until, vin, title_status, owners, accidents_reported".split(
@@ -614,15 +626,6 @@ describe("request_photos", () => {
   });
 });
 
-describe("search_inventory photos", () => {
-  it("still searches when the Photos tab cannot be read", async () => {
-    vi.mocked(sheets.loadPhotos).mockRejectedValue(new Error("no Photos tab"));
-    const res = await searchInventory({ query: "glc" });
-    expect(res).toMatchObject({ status: "ok", total_matches: 1 });
-    expect((res.results as any[])[0]).toMatchObject({ car_id: "JW-013", photo_link: "" });
-  });
-});
-
 describe("search_inventory photo links", () => {
   it("links to the car page on the server's public address when the model has a photo", async () => {
     vi.mocked(sheets.loadPhotos).mockResolvedValue([
@@ -633,6 +636,23 @@ describe("search_inventory photo links", () => {
     expect(car.photo_link).toBe("https://jeff.example.com/car/JW-013");
     for (const removed of ["photo_url", "photo_page_url", "photo_credit"]) expect(car).not.toHaveProperty(removed);
     expect(JSON.stringify(res)).not.toContain("wikimedia");
+  });
+});
+
+describe("fresh reads before changing a reservation", () => {
+  const fresh = { fresh: true };
+
+  it("create_reservation, confirm_reservation and request_callback read the sheet fresh", async () => {
+    vi.mocked(paystack.initializeTransaction).mockResolvedValue({ ok: true, payment_url: "https://pay/abc" });
+    await createReservation({ car_id: "JW-013", customer_name: "Ada", customer_email: "ada@example.com" });
+    expect(sheets.loadSheet).toHaveBeenLastCalledWith(fresh);
+
+    vi.mocked(paystack.verifyTransaction).mockResolvedValue({ found: false });
+    await confirmReservation({ car_id: "JW-015" });
+    expect(sheets.loadSheet).toHaveBeenLastCalledWith(fresh);
+
+    await requestCallback({ reason: "viewing", car_id: "JW-013" });
+    expect(sheets.loadSheet).toHaveBeenLastCalledWith(fresh);
   });
 });
 

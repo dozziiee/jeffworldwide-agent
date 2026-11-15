@@ -1,7 +1,7 @@
 // Google Sheets access: the sheet is the only data store.
 // Uses the Sheets REST API directly with a service-account JWT (no heavy SDK).
 
-import { createSign } from "node:crypto";
+import { createPrivateKey, createSign, type KeyObject } from "node:crypto";
 import { requestJson, requireEnv, ServiceUnavailable } from "./http";
 import type { CostsUsd, Settings } from "./pricing";
 
@@ -170,162 +170,7 @@ export function parseInventory(rows: unknown[][]): { cars: Car[]; columns: Recor
   return { cars, columns };
 }
 
-// ---------- Google auth ----------
-
-let cachedToken: { value: string; expiresAt: number } | null = null;
-
-async function accessToken(): Promise<string> {
-  if (cachedToken && cachedToken.expiresAt > Date.now() + 60_000) return cachedToken.value;
-
-  const email = requireEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL");
-  const key = requireEnv("GOOGLE_PRIVATE_KEY").replace(/\\n/g, "\n");
-  const now = Math.floor(Date.now() / 1000);
-  const b64 = (obj: object) => Buffer.from(JSON.stringify(obj)).toString("base64url");
-  const unsigned = `${b64({ alg: "RS256", typ: "JWT" })}.${b64({
-    iss: email,
-    scope: "https://www.googleapis.com/auth/spreadsheets",
-    aud: "https://oauth2.googleapis.com/token",
-    iat: now,
-    exp: now + 3600,
-  })}`;
-
-  let signature: string;
-  try {
-    signature = createSign("RSA-SHA256").update(unsigned).sign(key, "base64url");
-  } catch {
-    throw new ServiceUnavailable("GOOGLE_PRIVATE_KEY is not a valid private key");
-  }
-
-  const res = await requestJson("Google", "https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: `${unsigned}.${signature}`,
-    }),
-  });
-  if (!res.ok) throw new ServiceUnavailable(`Google auth failed: ${res.body?.error_description ?? res.status}`);
-
-  cachedToken = { value: res.body.access_token, expiresAt: Date.now() + res.body.expires_in * 1000 };
-  return cachedToken.value;
-}
-
-/** One authenticated call to the Sheets API for this spreadsheet. Exported for the one-off scripts. */
-export async function sheetsRequest(path: string, init: RequestInit = {}): Promise<any> {
-  const token = await accessToken();
-  // Paths like "values/..." hang off the spreadsheet; ":batchUpdate" is an action on it.
-  const separator = path.startsWith(":") || path.startsWith("?") ? "" : "/";
-  const res = await requestJson("Google Sheets", `${API}/${requireEnv("GOOGLE_SHEET_ID")}${separator}${path}`, {
-    ...init,
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-  });
-  if (!res.ok) throw new ServiceUnavailable(`Google Sheets error: ${res.body?.error?.message ?? res.status}`);
-  return res.body;
-}
-
-// ---------- public API ----------
-
-/** Reads Inventory and Settings fresh, in one request. */
-export async function loadSheet(): Promise<Sheet> {
-  const body = await sheetsRequest("values:batchGet?ranges=Inventory&ranges=Settings");
-  const [inventory, settings] = body.valueRanges ?? [];
-  return { ...parseInventory(inventory?.values ?? []), settings: parseSettings(settings?.values ?? []) };
-}
-
-function columnLetter(index: number): string {
-  let letters = "";
-  for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) {
-    letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
-  }
-  return letters;
-}
-
-export type RowFields = Partial<
-  Record<"reservation_ref" | "reservation_status" | "agreed_price_ngn" | "payment_url" | "review_until", string | number>
->;
-
-/**
- * Writes the given reservation columns on one car's row. "" clears a cell.
- * A column that does not exist yet is added to the Inventory tab, unless it is only being cleared.
- */
-export async function writeReservation(sheet: Sheet, car: Car, fields: RowFields): Promise<void> {
-  const data = [];
-  for (const [name, value] of Object.entries(fields)) {
-    if (!(name in sheet.columns)) {
-      if (value === "") continue; // nothing to clear
-      const index = Math.max(...Object.values(sheet.columns)) + 1; // first free column
-      await sheetsRequest(`values/Inventory!${columnLetter(index)}1?valueInputOption=RAW`, {
-        method: "PUT",
-        body: JSON.stringify({ values: [[name]] }),
-      });
-      sheet.columns[name] = index;
-    }
-    data.push({ range: `Inventory!${columnLetter(sheet.columns[name])}${car.row}`, values: [[value]] });
-  }
-  if (!data.length) return;
-  await sheetsRequest("values:batchUpdate", {
-    method: "POST",
-    body: JSON.stringify({ valueInputOption: "RAW", data }),
-  });
-}
-
-// ---------- Logs tab ----------
-
-export const LOG_HEADERS = [
-  "timestamp_utc",
-  "tool",
-  "inputs_json",
-  "status",
-  "total_matches",
-  "reference",
-  "duration_ms",
-  "error_message",
-];
-
-/** Reads a tab, creating the tab and its header row if either is missing. */
-async function readOrCreateTab(title: string, headers: string[], range = title): Promise<unknown[][]> {
-  let rows: unknown[][] = [];
-  try {
-    rows = (await sheetsRequest(`values/${range}`)).values ?? [];
-  } catch {
-    // Reading failed, most likely because the tab does not exist yet.
-    await sheetsRequest(":batchUpdate", {
-      method: "POST",
-      body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
-    });
-  }
-  if (!rows[0]?.length) {
-    await sheetsRequest(`values/${title}!A1?valueInputOption=RAW`, {
-      method: "PUT",
-      body: JSON.stringify({ values: [headers] }),
-    });
-  }
-  return rows;
-}
-
-const readyTabs = new Set<string>(); // tabs already checked by this server instance
-
-/** Appends one row to a tab, creating the tab and header first if needed. Values are plain text, never formulas. */
-async function appendRow(title: string, headers: string[], row: (string | number)[]): Promise<void> {
-  if (!readyTabs.has(title)) {
-    await readOrCreateTab(title, headers, `${title}!A1:Z1`);
-    readyTabs.add(title);
-  }
-  await sheetsRequest(`values/${title}!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
-    method: "POST",
-    body: JSON.stringify({ values: [row] }),
-  });
-}
-
-export const appendLog = (row: (string | number)[]) => appendRow("Logs", LOG_HEADERS, row);
-
-// ---------- Requests tab ----------
-
-export const REQUEST_HEADERS = ["timestamp_utc", "car_id", "title", "request_type", "reason", "note", "status", "reference"];
-
-export const appendRequest = (row: (string | number)[]) => appendRow("Requests", REQUEST_HEADERS, row);
-
-// ---------- Photos tab ----------
+// ---------- Photos and Market rows (parsing) ----------
 
 export const PHOTO_HEADERS = ["make", "model", "photo_url", "page_url", "author", "licence"];
 
@@ -347,23 +192,6 @@ export function parsePhotos(rows: unknown[][]): PhotoRow[] {
       licence: get(cells, "licence"),
     }));
 }
-
-/** Reads the Photos tab fresh, creating it with headers if it does not exist. */
-export async function loadPhotos(): Promise<PhotoRow[]> {
-  return parsePhotos(await readOrCreateTab("Photos", PHOTO_HEADERS));
-}
-
-/** Replaces a whole tab with a header row plus the given rows. Used by one-off scripts, not by the server. */
-export async function replaceTab(title: string, headers: string[], rows: (string | number)[][]): Promise<void> {
-  await readOrCreateTab(title, headers);
-  await sheetsRequest(`values/${title}:clear`, { method: "POST", body: "{}" });
-  await sheetsRequest(`values/${title}!A1?valueInputOption=RAW`, {
-    method: "PUT",
-    body: JSON.stringify({ values: [headers, ...rows] }),
-  });
-}
-
-// ---------- Market tab ----------
 
 export const MARKET_HEADERS = [
   "make",
@@ -421,7 +249,294 @@ export function parseMarket(rows: unknown[][]): MarketRow[] {
   return market;
 }
 
-/** Reads the Market tab fresh, creating it with headers if it does not exist. */
-export async function loadMarket(): Promise<MarketRow[]> {
-  return parseMarket(await readOrCreateTab("Market", MARKET_HEADERS));
+export const LOG_HEADERS = [
+  "timestamp_utc",
+  "tool",
+  "inputs_json",
+  "status",
+  "total_matches",
+  "reference",
+  "duration_ms",
+  "error_message",
+];
+
+export const REQUEST_HEADERS = ["timestamp_utc", "car_id", "title", "request_type", "reason", "note", "status", "reference"];
+
+// ---------- Google auth: one client per server instance ----------
+
+/** A failed Sheets API call, with Google's HTTP status and message. Still counts as "service unavailable". */
+export class SheetsApiError extends ServiceUnavailable {
+  constructor(
+    readonly status: number,
+    readonly apiMessage: string,
+  ) {
+    super(`Google Sheets error: ${apiMessage || status}`);
+  }
+}
+
+/** True only when Google explicitly says the tab does not exist. A timeout or any other failure is not that. */
+export const isMissingTab = (err: unknown): err is SheetsApiError =>
+  err instanceof SheetsApiError && err.status === 400 && /unable to parse range/i.test(err.apiMessage);
+
+/** Google calls go through here: on a timeout, network error or 5xx, try once more before giving up. */
+async function googleRequest(service: string, url: string, init: RequestInit, retry = true) {
+  try {
+    return await requestJson(service, url, init);
+  } catch (err) {
+    if (!retry || !(err instanceof ServiceUnavailable)) throw err;
+    console.warn(`[google] ${err.message}; retrying once`);
+    return requestJson(service, url, init);
+  }
+}
+
+// Created once and reused by every call this server instance handles.
+const googleAuth: { key: KeyObject | null; token: string; expiresAt: number; pending: Promise<string> | null } = {
+  key: null,
+  token: "",
+  expiresAt: 0,
+  pending: null,
+};
+
+async function fetchToken(): Promise<string> {
+  const email = requireEnv("GOOGLE_SERVICE_ACCOUNT_EMAIL");
+  try {
+    googleAuth.key ??= createPrivateKey(requireEnv("GOOGLE_PRIVATE_KEY").replace(/\\n/g, "\n"));
+  } catch (err) {
+    if (err instanceof ServiceUnavailable) throw err;
+    throw new ServiceUnavailable("GOOGLE_PRIVATE_KEY is not a valid private key");
+  }
+  const now = Math.floor(Date.now() / 1000);
+  const b64 = (obj: object) => Buffer.from(JSON.stringify(obj)).toString("base64url");
+  const unsigned = `${b64({ alg: "RS256", typ: "JWT" })}.${b64({
+    iss: email,
+    scope: "https://www.googleapis.com/auth/spreadsheets",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  })}`;
+  const signature = createSign("RSA-SHA256").update(unsigned).sign(googleAuth.key, "base64url");
+
+  const res = await googleRequest("Google", "https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: `${unsigned}.${signature}`,
+    }),
+  });
+  if (!res.ok) throw new ServiceUnavailable(`Google auth failed: ${res.body?.error_description ?? res.status}`);
+
+  googleAuth.token = res.body.access_token;
+  googleAuth.expiresAt = Date.now() + res.body.expires_in * 1000;
+  return googleAuth.token;
+}
+
+/** The current access token; fetched at most once at a time and reused until it is about to expire. */
+async function accessToken(): Promise<string> {
+  if (googleAuth.token && googleAuth.expiresAt > Date.now() + 60_000) return googleAuth.token;
+  googleAuth.pending ??= fetchToken().finally(() => (googleAuth.pending = null));
+  return googleAuth.pending;
+}
+
+/**
+ * One authenticated call to the Sheets API for this spreadsheet. Exported for the one-off scripts.
+ * retry: pass false for calls that must not be repeated (appending a row twice would duplicate it).
+ */
+export async function sheetsRequest(path: string, init: RequestInit = {}, retry = true): Promise<any> {
+  const token = await accessToken();
+  // Paths like "values/..." hang off the spreadsheet; ":batchUpdate" and "?fields=" act on it directly.
+  const separator = path.startsWith(":") || path.startsWith("?") ? "" : "/";
+  const res = await googleRequest(
+    "Google Sheets",
+    `${API}/${requireEnv("GOOGLE_SHEET_ID")}${separator}${path}`,
+    { ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
+    retry,
+  );
+  if (!res.ok) throw new SheetsApiError(res.status, String(res.body?.error?.message ?? ""));
+  return res.body;
+}
+
+// ---------- reading tabs: one request, cached in memory ----------
+
+type TabName = "Inventory" | "Settings" | "Market" | "Photos";
+
+// How long each tab's rows are reused, and the header row for tabs the server may create.
+const TABS: Record<TabName, { ttlMs: number; headers?: string[] }> = {
+  Inventory: { ttlMs: 15_000 },
+  Settings: { ttlMs: 15_000 },
+  Market: { ttlMs: 15_000, headers: MARKET_HEADERS },
+  Photos: { ttlMs: 10 * 60_000, headers: PHOTO_HEADERS },
+};
+
+const cache = new Map<TabName, { rows: unknown[][]; at: number }>();
+
+/** Forgets cached rows: one tab, or everything. The next read fetches them again. */
+export function clearCache(tab?: TabName): void {
+  if (tab) cache.delete(tab);
+  else cache.clear();
+}
+
+/** For tests: forget the cache and the Google token. */
+export function resetSheetsState(): void {
+  cache.clear();
+  Object.assign(googleAuth, { key: null, token: "", expiresAt: 0, pending: null });
+}
+
+async function createTab(title: string, headers: string[]): Promise<void> {
+  await sheetsRequest(":batchUpdate", {
+    method: "POST",
+    body: JSON.stringify({ requests: [{ addSheet: { properties: { title } } }] }),
+  });
+  await sheetsRequest(`values/${title}!A1?valueInputOption=RAW`, {
+    method: "PUT",
+    body: JSON.stringify({ values: [headers] }),
+  });
+}
+
+/** Fetches the given tabs in ONE batchGet and caches them. */
+async function fetchTabs(names: TabName[]): Promise<void> {
+  try {
+    const body = await sheetsRequest(`values:batchGet?${names.map((name) => `ranges=${name}`).join("&")}`);
+    const at = Date.now();
+    names.forEach((name, i) => cache.set(name, { rows: body.valueRanges?.[i]?.values ?? [], at }));
+  } catch (err) {
+    // A tab is created only when Google explicitly reports that it does not exist, and only if
+    // it is one the server owns (Market, Photos). Timeouts and other errors are never a reason to create one.
+    const missing = isMissingTab(err)
+      ? names.find((name) => TABS[name].headers && new RegExp(`:\\s*'?${name}\\b`, "i").test(err.apiMessage))
+      : undefined;
+    if (!missing) throw err;
+    const headers = TABS[missing].headers!;
+    console.warn(`[sheet] the ${missing} tab does not exist; creating it`);
+    await createTab(missing, headers);
+    cache.set(missing, { rows: [headers], at: Date.now() });
+    const rest = names.filter((name) => name !== missing);
+    if (rest.length) await fetchTabs(rest);
+  }
+}
+
+/** Rows for the given tabs: from the cache while fresh, otherwise all stale ones in a single request. */
+async function readTabs(names: TabName[]): Promise<Record<TabName, unknown[][]>> {
+  const now = Date.now();
+  const stale = names.filter((name) => {
+    const hit = cache.get(name);
+    return !hit || now - hit.at >= TABS[name].ttlMs;
+  });
+  if (stale.length) await fetchTabs(stale);
+  return Object.fromEntries(names.map((name) => [name, cache.get(name)!.rows])) as Record<TabName, unknown[][]>;
+}
+
+export type SheetData = { sheet: Sheet; photos: PhotoRow[]; market: MarketRow[] };
+
+/**
+ * Everything a tool needs, in one request: Inventory and Settings, plus Photos and/or Market if asked for.
+ * fresh: read Inventory from Google even if a cached copy is available. Use it before changing a reservation.
+ */
+export async function loadData(extra: ("Photos" | "Market")[] = [], options: { fresh?: boolean } = {}): Promise<SheetData> {
+  if (options.fresh) clearCache("Inventory");
+  const rows = await readTabs(["Inventory", "Settings", ...extra]);
+  return {
+    sheet: { ...parseInventory(rows.Inventory), settings: parseSettings(rows.Settings) },
+    photos: extra.includes("Photos") ? parsePhotos(rows.Photos) : [],
+    market: extra.includes("Market") ? parseMarket(rows.Market) : [],
+  };
+}
+
+export const loadSheet = async (options: { fresh?: boolean } = {}): Promise<Sheet> => (await loadData([], options)).sheet;
+export const loadPhotos = async (): Promise<PhotoRow[]> => parsePhotos((await readTabs(["Photos"])).Photos);
+export const loadMarket = async (): Promise<MarketRow[]> => parseMarket((await readTabs(["Market"])).Market);
+
+/** Signs in to Google and loads every cached tab, so the next tool call is fast. Used by GET /health. */
+export async function warmUp(): Promise<void> {
+  await readTabs(["Inventory", "Settings", "Market", "Photos"]);
+}
+
+// ---------- writing ----------
+
+function columnLetter(index: number): string {
+  let letters = "";
+  for (let n = index + 1; n > 0; n = Math.floor((n - 1) / 26)) {
+    letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+  }
+  return letters;
+}
+
+export type RowFields = Partial<
+  Record<"reservation_ref" | "reservation_status" | "agreed_price_ngn" | "payment_url" | "review_until", string | number>
+>;
+
+/**
+ * Writes the given reservation columns on one car's row. "" clears a cell.
+ * A column that does not exist yet is added to the Inventory tab, unless it is only being cleared.
+ * The Inventory cache is cleared straight away, so no later read sees the old state.
+ */
+export async function writeReservation(sheet: Sheet, car: Car, fields: RowFields): Promise<void> {
+  clearCache("Inventory");
+  try {
+    const data = [];
+    for (const [name, value] of Object.entries(fields)) {
+      if (!(name in sheet.columns)) {
+        if (value === "") continue; // nothing to clear
+        const index = Math.max(...Object.values(sheet.columns)) + 1; // first free column
+        await sheetsRequest(`values/Inventory!${columnLetter(index)}1?valueInputOption=RAW`, {
+          method: "PUT",
+          body: JSON.stringify({ values: [[name]] }),
+        });
+        sheet.columns[name] = index;
+      }
+      data.push({ range: `Inventory!${columnLetter(sheet.columns[name])}${car.row}`, values: [[value]] });
+    }
+    if (!data.length) return;
+    await sheetsRequest("values:batchUpdate", {
+      method: "POST",
+      body: JSON.stringify({ valueInputOption: "RAW", data }),
+    });
+  } finally {
+    clearCache("Inventory"); // also drop anything read while the write was in flight
+  }
+}
+
+/**
+ * Appends one row to a tab. Values are plain text, never formulas.
+ * If Google reports that the tab does not exist, it is created with its headers and the row is appended.
+ * The append is not repeated after a timeout, because the first attempt may have gone through.
+ */
+async function appendRow(title: string, headers: string[], row: (string | number)[]): Promise<void> {
+  const append = () =>
+    sheetsRequest(
+      `values/${title}!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,
+      { method: "POST", body: JSON.stringify({ values: [row] }) },
+      false,
+    );
+  try {
+    await append();
+  } catch (err) {
+    if (!isMissingTab(err)) throw err;
+    console.warn(`[sheet] the ${title} tab does not exist; creating it`);
+    await createTab(title, headers);
+    await append();
+  }
+}
+
+export const appendLog = (row: (string | number)[]) => appendRow("Logs", LOG_HEADERS, row);
+
+/** Records a request for the team. Requests can change what happens to a car, so the Inventory cache is cleared. */
+export async function appendRequest(row: (string | number)[]): Promise<void> {
+  clearCache("Inventory");
+  await appendRow("Requests", REQUEST_HEADERS, row);
+}
+
+/** Replaces a whole tab with a header row plus the given rows. Used by one-off scripts, not by the server. */
+export async function replaceTab(title: string, headers: string[], rows: (string | number)[][]): Promise<void> {
+  try {
+    await sheetsRequest(`values/${title}:clear`, { method: "POST", body: "{}" });
+  } catch (err) {
+    if (!isMissingTab(err)) throw err;
+    await createTab(title, headers);
+  }
+  await sheetsRequest(`values/${title}!A1?valueInputOption=RAW`, {
+    method: "PUT",
+    body: JSON.stringify({ values: [headers, ...rows] }),
+  });
+  clearCache();
 }
