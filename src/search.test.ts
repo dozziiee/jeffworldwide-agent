@@ -7,7 +7,7 @@ const HEADER =
     ", ",
   );
 
-const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, maxDiscountNgn: 500_000 };
+const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, discountPct: 0.015, discountMinNgn: 200_000, discountMaxNgn: 2_000_000 };
 
 const inStock = (id: string, make: string, model: string, year: number, trim: string, colour: string, interior: string, price: number, reservation = "available") =>
   [id, make, model, year, trim, colour, interior, "30,000", "in_stock", price, "Lagos", "", "", "", "", "", "", "", "", "", "", "", reservation];
@@ -184,9 +184,17 @@ describe("searchCars: photo links", () => {
 });
 
 describe("searchCars: display fields", () => {
-  it("adds the lowest price to each car", () => {
+  it("adds the lowest price and the first offer to each car", () => {
     const [car] = search({ query: "honda accord 2020" }).results as any[];
-    expect(car).toMatchObject({ price_ngn: 52_000_000, price_display: "52m", lowest_price_ngn: 51_500_000, lowest_price_display: "51.5m" });
+    // 52m: discount 780,000; first offer 52m - 312,000 = 51,688,000, rounded down.
+    expect(car).toMatchObject({
+      price_ngn: 52_000_000,
+      price_display: "52m",
+      lowest_price_ngn: 51_220_000,
+      lowest_price_display: "51.22m",
+      first_offer_ngn: 51_680_000,
+      first_offer_display: "51.68m",
+    });
   });
 
   it("adds mileage_display and keeps the raw mileage", () => {

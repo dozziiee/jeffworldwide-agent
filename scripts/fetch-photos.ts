@@ -6,6 +6,7 @@
 //
 // The picks are automatic, so check the printed table and fix any wrong ones in the sheet by hand.
 
+import { HEADERS } from "../src/config/constants";
 import { normalise } from "../src/search";
 import { loadSheet, PHOTO_HEADERS, replaceTab } from "../src/sheets";
 
@@ -62,7 +63,7 @@ function thumbUrl(originalUrl: string, width: number): string {
 async function politeFetch(url: string, init: RequestInit = {}): Promise<Response> {
   for (let attempt = 1; ; attempt++) {
     await sleep(1000);
-    const res = await fetch(url, { ...init, headers: { "user-agent": USER_AGENT }, signal: AbortSignal.timeout(20_000) });
+    const res = await fetch(url, { ...init, headers: { [HEADERS.USER_AGENT]: USER_AGENT }, signal: AbortSignal.timeout(20_000) });
     if (res.status !== 429 || attempt === 4) return res;
     const wait = Number(res.headers.get("retry-after")) || 30 * attempt;
     console.warn(`  rate limited, waiting ${wait}s...`);
@@ -141,7 +142,7 @@ function assess(page: any, modelText: string, years: number[]): Candidate | null
 async function imageExists(url: string): Promise<boolean> {
   try {
     const res = await politeFetch(url, { method: "HEAD" });
-    return res.ok && String(res.headers.get("content-type")).startsWith("image/");
+    return res.ok && String(res.headers.get(HEADERS.CONTENT_TYPE)).startsWith("image/");
   } catch {
     return false;
   }

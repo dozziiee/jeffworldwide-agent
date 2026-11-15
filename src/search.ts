@@ -1,5 +1,6 @@
 // Inventory search: query normalisation, matching, ordering and result shaping. Pure, no I/O.
 
+import { ROUTES } from "./config/constants";
 import { quote, type Quote, type Settings } from "./pricing";
 import { isHeld, toNumber, type Car, PhotoRow } from "./sheets";
 import type { ToolResult } from "./tools";
@@ -75,7 +76,7 @@ export function findPhoto(photos: PhotoRow[], car: Car): PhotoRow | undefined {
 }
 
 /** The public page for a car: "<base url>/car/<car_id>". */
-export const carPageUrl = (baseUrl: string, carId: string) => `${baseUrl.replace(/\/+$/, "")}/car/${encodeURIComponent(carId)}`;
+export const carPageUrl = (baseUrl: string, carId: string) => `${baseUrl.replace(/\/+$/, "")}${ROUTES.CAR}/${encodeURIComponent(carId)}`;
 
 function carView(car: Car, q: Quote, photoLink: string) {
   return {

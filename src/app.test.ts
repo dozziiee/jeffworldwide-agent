@@ -17,7 +17,7 @@ const HEADER =
   "car_id, make, model, year, trim, colour, interior, mileage, status, price_ngn, location, auction_price_usd, auction_fees_usd, ground_shipping_usd, ocean_shipping_usd, clearing_usd, origin_port, destination_port, shipping_type, expected_berth, highlights, reservation_ref, reservation_status, agreed_price_ngn, payment_url, review_until, vin, title_status, owners, accidents_reported".split(
     ", ",
   );
-const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, maxDiscountNgn: 500_000 };
+const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, discountPct: 0.015, discountMinNgn: 200_000, discountMaxNgn: 2_000_000 };
 const ROWS = [
   HEADER,
   ["JW-065", "Toyota", "Highlander", "2021", "XSE AWD", "Blue", "Black", "42800", "in_stock", "42,900,000", "Lagos", "", "", "", "", "", "", "", "", "", "", "JW-065-1794755450557", "reserved", "42400000", "", "", "5TDGZRBH9MSJW0065", "Clean", "2", "None reported"],
@@ -58,7 +58,7 @@ describe("GET /car/:car_id", () => {
     expect(html).toContain("5TDGZRBH9MSJW0065");
     expect(html).toContain(`<meta property="og:image" content="${photo.photo_url}">`);
     // The car is reserved with an agreed price, but none of that is public.
-    expect(html).not.toMatch(/reserved|42\.4m|42400000|JW-065-1794755450557/);
+    expect(html).not.toMatch(/reserved|42\.4m|42\.26m|42\.64m|42400000|JW-065-1794755450557/);
   });
 
   it("matches the car id without regard to case", async () => {

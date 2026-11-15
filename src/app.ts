@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { renderCarPage, renderMessagePage } from "./carPage";
+import { CAR_PAGE_ROUTE, HEADERS, ROUTES } from "./config/constants";
 import { quote } from "./pricing";
 import { carPageUrl, findPhoto } from "./search";
 import { loadData, warmUp } from "./sheets";
@@ -14,10 +15,10 @@ const rpcError = (code: number, message: string) => ({ jsonrpc: "2.0", error: { 
 
 function requireBearer(req: Request, res: Response, next: NextFunction) {
   const expected = Buffer.from(`Bearer ${process.env.MCP_AUTH_TOKEN ?? ""}`);
-  const given = Buffer.from(req.headers.authorization ?? "");
+  const given = Buffer.from(req.headers[HEADERS.AUTHORIZATION] ?? "");
   const ok = !!process.env.MCP_AUTH_TOKEN && given.length === expected.length && timingSafeEqual(given, expected);
   if (!ok) {
-    res.status(401).set("WWW-Authenticate", "Bearer").json(rpcError(-32001, "Unauthorized"));
+    res.status(401).set(HEADERS.WWW_AUTHENTICATE, "Bearer").json(rpcError(-32001, "Unauthorized"));
     return;
   }
   next();
@@ -28,7 +29,7 @@ app.use(express.json({ limit: "1mb" }));
 
 // Health check that also warms the server: it signs in to Google and loads the cached tabs,
 // so the next tool call does not pay for that. Replies "ok" with the time taken.
-app.get("/health", async (_req, res) => {
+app.get(ROUTES.HEALTH, async (_req, res) => {
   const started = Date.now();
   try {
     await warmUp();
@@ -42,13 +43,13 @@ app.get("/health", async (_req, res) => {
 /** The public address of this server: PUBLIC_BASE_URL if set, otherwise worked out from the request. */
 function publicBaseUrl(req: Request): string {
   if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/+$/, "");
-  const host = req.headers.host ?? "localhost";
+  const host = req.headers[HEADERS.HOST] ?? "localhost";
   const local = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host);
   return `${local ? "http" : "https"}://${host}`;
 }
 
 // Public car page: no auth, customer-facing details only.
-app.get("/car/:car_id", async (req, res) => {
+app.get(CAR_PAGE_ROUTE, async (req, res) => {
   const html = (status: number, body: string) => res.status(status).type("html").send(body);
   try {
     const { sheet, photos } = await loadData(["Photos"]);
@@ -58,7 +59,7 @@ app.get("/car/:car_id", async (req, res) => {
       html(404, renderMessagePage("Car not found", "We could not find that car. It may have been sold, or the link may be incomplete."));
       return;
     }
-    res.set("Cache-Control", "public, max-age=300");
+    res.set(HEADERS.CACHE_CONTROL, "public, max-age=300");
     html(200, renderCarPage(car, quote(car, sheet.settings), findPhoto(photos, car), carPageUrl(publicBaseUrl(req), car.car_id)));
   } catch (err) {
     console.error("[car page] failed:", err instanceof Error ? err.message : err);
@@ -66,9 +67,9 @@ app.get("/car/:car_id", async (req, res) => {
   }
 });
 
-app.use("/mcp", requireBearer);
+app.use(ROUTES.MCP, requireBearer);
 
-app.post("/mcp", async (req, res) => {
+app.post(ROUTES.MCP, async (req, res) => {
   // Stateless: a fresh server and transport per request, so it works on serverless.
   const server = new McpServer({ name: "jeffworldwide", version: "1.0.0" });
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -87,8 +88,8 @@ app.post("/mcp", async (req, res) => {
 });
 
 // No sessions, so there is no SSE stream to open and nothing to delete.
-app.all("/mcp", (_req, res) => {
-  res.status(405).set("Allow", "POST").json(rpcError(-32000, "Method not allowed"));
+app.all(ROUTES.MCP, (_req, res) => {
+  res.status(405).set(HEADERS.ALLOW, "POST").json(rpcError(-32000, "Method not allowed"));
 });
 
 // Malformed JSON bodies and anything else unexpected.

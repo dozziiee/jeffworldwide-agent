@@ -18,7 +18,9 @@ const SETTINGS = [
   ["deposit_pct_pre_order", "40%"],
   ["hold_hours_in_stock", "72"],
   ["doorstep_delivery_ngn", "100000"],
-  ["max_discount_ngn", "500000"],
+  ["discount_pct", "0.015"],
+  ["discount_min_ngn", "200000"],
+  ["discount_max_ngn", "2000000"],
 ];
 const PHOTOS = [
   ["make", "model", "photo_url", "page_url", "author", "licence"],
@@ -102,7 +104,7 @@ describe("one request per tool call", () => {
     const data = await loadData(["Photos"]);
     expect(tabsRead()).toEqual(["Inventory+Settings+Photos"]);
     expect(data.sheet.cars).toHaveLength(1);
-    expect(data.sheet.settings.maxDiscountNgn).toBe(500_000);
+    expect(data.sheet.settings.discountMaxNgn).toBe(2_000_000);
     expect(data.photos).toHaveLength(1);
   });
 

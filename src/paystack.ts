@@ -1,5 +1,6 @@
 // Minimal Paystack client: initialize a transaction and verify one.
 
+import { HEADERS } from "./config/constants";
 import { requestJson, requireEnv } from "./http";
 
 const API = "https://api.paystack.co";
@@ -14,7 +15,7 @@ export type ReservationMetadata = {
 };
 
 function headers() {
-  return { authorization: `Bearer ${requireEnv("PAYSTACK_SECRET_KEY")}`, "content-type": "application/json" };
+  return { [HEADERS.AUTHORIZATION]: `Bearer ${requireEnv("PAYSTACK_SECRET_KEY")}`, [HEADERS.CONTENT_TYPE]: "application/json" };
 }
 
 export type InitResult = { ok: true; payment_url: string } | { ok: false; message: string };

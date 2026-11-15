@@ -1,5 +1,7 @@
 // Team alert: sends a one-line WhatsApp message through Twilio. Best effort; it never throws.
 
+import { HEADERS } from "./config/constants";
+
 const ALERT_TIMEOUT_MS = 5_000;
 const MAX_LENGTH = 250;
 
@@ -60,7 +62,7 @@ export async function sendAlert(alert: Alert): Promise<boolean> {
     try {
       const res = await fetch(url, {
         method: "POST",
-        headers: { authorization, "content-type": "application/x-www-form-urlencoded" },
+        headers: { [HEADERS.AUTHORIZATION]: authorization, [HEADERS.CONTENT_TYPE]: "application/x-www-form-urlencoded" },
         body: new URLSearchParams({ ...address, ...content }),
         signal: AbortSignal.timeout(ALERT_TIMEOUT_MS),
       });

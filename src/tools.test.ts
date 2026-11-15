@@ -38,7 +38,7 @@ const HEADER =
 const RELEASED = { reservation_ref: "", reservation_status: "available", agreed_price_ngn: "", payment_url: "", review_until: "" };
 const HOUR = 3_600_000;
 
-const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, maxDiscountNgn: 500_000 };
+const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, discountPct: 0.015, discountMinNgn: 200_000, discountMaxNgn: 2_000_000 };
 
 function sheetWith(reservation: { ref?: string; status?: string; payment_url?: string; review_until?: string } = {}) {
   const rows = [
@@ -77,8 +77,10 @@ describe("search_inventory", () => {
         price_basis: "on_ground_lagos",
         price_ngn: 59_900_000,
         price_display: "59.9m",
-        lowest_price_ngn: 59_400_000,
-        lowest_price_display: "59.4m",
+        lowest_price_ngn: 59_010_000,
+        lowest_price_display: "59.01m",
+        first_offer_ngn: 59_540_000,
+        first_offer_display: "59.54m",
         deposit_pct: 30,
         deposit_ngn: 17_970_000,
         deposit_display: "₦17,970,000",
@@ -147,7 +149,7 @@ describe("create_reservation with an agreed price", () => {
   beforeEach(() => vi.mocked(paystack.initializeTransaction).mockResolvedValue({ ok: true, payment_url: "https://pay/abc" }));
 
   it("valid agreed price: the deposit is calculated on it, and it is recorded", async () => {
-    // Quoted 59.9m, floor 59.4m, in-stock deposit 30%.
+    // Quoted 59.9m, floor 59.01m, in-stock deposit 30%.
     const res = await createReservation({ ...input, agreed_price_ngn: 59_650_000 });
     expect(res).toMatchObject({
       status: "link_created",
@@ -165,16 +167,16 @@ describe("create_reservation with an agreed price", () => {
   });
 
   it("accepts the floor and the quoted price exactly, and amounts typed with commas", async () => {
-    expect(await createReservation({ ...input, agreed_price_ngn: 59_400_000 })).toMatchObject({ status: "link_created", deposit_ngn: 17_820_000 });
+    expect(await createReservation({ ...input, agreed_price_ngn: 59_010_000 })).toMatchObject({ status: "link_created", deposit_ngn: 17_703_000 });
     expect(await createReservation({ ...input, agreed_price_ngn: "59,900,000" })).toMatchObject({ status: "link_created", deposit_ngn: 17_970_000, agreed_price_display: "59.9m" });
   });
 
   it("below the floor: price_below_minimum, no payment link, row untouched", async () => {
-    expect(await createReservation({ ...input, agreed_price_ngn: 59_399_999 })).toEqual({
+    expect(await createReservation({ ...input, agreed_price_ngn: 59_009_999 })).toEqual({
       status: "price_below_minimum",
-      message: "The lowest price for this car is 59.4m.",
-      lowest_price_ngn: 59_400_000,
-      lowest_price_display: "59.4m",
+      message: "The lowest price for this car is 59.01m.",
+      lowest_price_ngn: 59_010_000,
+      lowest_price_display: "59.01m",
       price_display: "59.9m",
     });
     expect(paystack.initializeTransaction).not.toHaveBeenCalled();

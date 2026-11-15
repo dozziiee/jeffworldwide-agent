@@ -31,6 +31,7 @@ src/sheets.ts    Google Sheets read/write, row parsing, and the Logs, Market, Ph
 src/paystack.ts  Paystack initialize and verify
 src/tools.ts     the tools, logging and error handling
 src/alerts.ts    the WhatsApp team alert, sent through Twilio
+src/config/constants.ts   route paths and HTTP header names
 src/carPage.ts   the public car page (HTML)
 src/vin.ts       demo VIN building and check-digit validation
 src/app.ts       Express app: auth, /mcp, /health, /car/:car_id
@@ -70,7 +71,7 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 - The server adds and maintains three more columns after these: `agreed_price_ngn` (a negotiated price), `payment_url` (the Paystack link for a pending payment) and `review_until` (when a payment review hold ends).
 - Rows that cannot be parsed (no `car_id`, unknown status, missing price or costs) are skipped and logged.
 
-**Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock, doorstep_delivery_ngn, max_discount_ngn`. `doorstep_delivery_ngn` and `max_discount_ngn` are optional: if a row is missing it counts as 0 and a warning is logged. Percentages can be written as `0.3`, `30` or `30%`. Settings are cached for 15 seconds, so a change in the sheet applies within that time.
+**Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock, doorstep_delivery_ngn, discount_pct, discount_min_ngn, discount_max_ngn`. `doorstep_delivery_ngn` is optional: if the row is missing it counts as 0 and a warning is logged. The three discount rows go together: if any of them is missing or invalid, there is no discount and a warning is logged. An old `max_discount_ngn` row is ignored. Percentages can be written as `0.3`, `30` or `30%`. Settings are cached for 15 seconds, so a change in the sheet applies within that time.
 
 ## Search
 
@@ -192,7 +193,8 @@ Columns: `timestamp_utc, tool, inputs_json, status, total_matches, reference, du
 - In stock: `price_ngn` from the sheet.
 - Pre-order: `(auction + fees + ground + ocean + clearing) × fx_rate × (1 + margin_pct) + doorstep_delivery_ngn`, then the X.9 rule in millions of naira: up to `f + 0.9` → `f + 0.9`; up to `f + 0.99` → `f + 0.99`; otherwise `f + 1.9`. So 57.3 → 57.9, 57.95 → 57.99, 57.995 → 58.9.
 - Deposit: price × the deposit percentage for that stock type, rounded to the nearest naira.
-- Negotiation floor: every car carries `lowest_price_ngn` and `lowest_price_display`, which is the price minus `max_discount_ngn`.
+- Negotiation room: the discount on a car is `price × discount_pct`, kept between `discount_min_ngn` and `discount_max_ngn`, rounded down to the nearest ₦10,000. With 0.015, ₦200,000 and ₦2,000,000: 18.9m → ₦280,000; 30.9m → ₦460,000; 107.9m → ₦1,610,000; 487.99m → ₦2,000,000.
+- Every car carries `lowest_price_ngn` / `lowest_price_display` (price minus the discount, the floor) and `first_offer_ngn` / `first_offer_display` (price minus 40% of the discount, rounded down to the nearest ₦10,000). The first offer is the agent's opening move when a buyer asks for a better price, so the agent never does the arithmetic. Neither appears on the public car page.
 - `create_reservation` accepts an optional `agreed_price_ngn`. It must be between the lowest price and the quoted price; below the floor returns `price_below_minimum` with `lowest_price_display`, and above the quoted price returns `invalid_input`. The deposit is calculated on the agreed price, which goes into the Paystack metadata and into the Inventory column `agreed_price_ngn` (added if missing). The column is cleared when a reservation is created without an agreed price or when a payment fails or is abandoned.
 - Every car carries `price_basis`: `to_your_doorstep` for pre-orders (delivery is in the price) and `on_ground_lagos` for in-stock cars.
 - `price_display` is in Jeff's style (`59.9m`); `deposit_display` is full naira with commas (`₦28,796,000`).
@@ -214,11 +216,13 @@ cp .env.example .env
 npm run dev
 ```
 
-The server listens on `http://localhost:3000/mcp`. Run the unit tests with:
+The server listens on `http://localhost:3000/mcp`. Run the tests with:
 
 ```bash
 npm test
 ```
+
+Besides the unit tests, `src/mcp.contract.test.ts` starts the app and connects with the MCP SDK client over Streamable HTTP, as Chord does. It checks that all tools are listed, calls each one (with Google Sheets, Paystack and Twilio mocked) and checks each returns JSON with a `status`, and checks that a missing or wrong bearer token gets a 401.
 
 ## Deploy to Vercel
 

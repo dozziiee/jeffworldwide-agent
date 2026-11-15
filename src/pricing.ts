@@ -7,7 +7,11 @@ export type Settings = {
   depositPctPreOrder: number; // fraction
   holdHoursInStock: number;
   doorstepDeliveryNgn: number; // flat naira amount added to every pre-order
-  maxDiscountNgn: number; // the most that can be negotiated off any car's price
+  // Negotiation room: price x discountPct, kept between discountMinNgn and discountMaxNgn.
+  // All three are 0 when any of them is missing from the sheet, which means no discount.
+  discountPct: number; // fraction, e.g. 0.015
+  discountMinNgn: number;
+  discountMaxNgn: number;
 };
 
 export type CostsUsd = {
@@ -27,8 +31,10 @@ export type Quote = {
   price_basis: PriceBasis; // pre-orders are priced delivered; in-stock cars as they stand in Lagos
   price_ngn: number;
   price_display: string;
-  lowest_price_ngn: number; // negotiation floor: price minus the maximum discount
+  lowest_price_ngn: number; // negotiation floor: price minus the discount
   lowest_price_display: string;
+  first_offer_ngn: number; // the agent's opening offer: price minus 40% of the discount
+  first_offer_display: string;
   deposit_pct: number; // percent, e.g. 30
   deposit_ngn: number;
   deposit_display: string;
@@ -58,6 +64,27 @@ export function preOrderPriceNgn(costs: CostsUsd, settings: Settings): number {
   return roundX9(totalUsd * settings.fxRateNgnPerUsd * (1 + settings.marginPct) + settings.doorstepDeliveryNgn);
 }
 
+const TEN_THOUSAND = 10_000;
+const roundDown10k = (naira: number) => Math.floor(naira / TEN_THOUSAND) * TEN_THOUSAND;
+
+/**
+ * Negotiation room on a price: price x discount_pct, clamped between discount_min_ngn and
+ * discount_max_ngn, rounded down to the nearest 10,000 naira.
+ * 18.9m -> 280,000; 30.9m -> 460,000; 107.9m -> 1,610,000; 487.99m -> 2,000,000 (the cap).
+ */
+export function discountNgn(priceNgn: number, settings: Settings): number {
+  if (!(settings.discountPct > 0) || !(settings.discountMaxNgn > 0)) return 0;
+  // Round to whole naira first, so floating-point error cannot drop a value below a 10,000 boundary.
+  const raw = Math.round(priceNgn * settings.discountPct);
+  const clamped = Math.min(Math.max(raw, settings.discountMinNgn), settings.discountMaxNgn);
+  return roundDown10k(clamped);
+}
+
+/** The agent's opening offer: price minus 40% of the discount, rounded down to the nearest 10,000, never below the floor. */
+export function firstOfferNgn(priceNgn: number, discount: number): number {
+  return Math.max(roundDown10k(priceNgn - 0.4 * discount), priceNgn - discount);
+}
+
 export function depositNgn(priceNgn: number, depositPct: number): number {
   return Math.round(priceNgn * depositPct);
 }
@@ -84,7 +111,9 @@ export function quote(
   }
   const pct = inStock ? settings.depositPctInStock : settings.depositPctPreOrder;
   const deposit = depositNgn(price, pct);
-  const lowest = Math.max(price - settings.maxDiscountNgn, 0);
+  const discount = discountNgn(price, settings);
+  const lowest = Math.max(price - discount, 0);
+  const firstOffer = firstOfferNgn(price, discount);
   return {
     stock_type: inStock ? "in_stock" : "pre_order",
     price_basis: inStock ? "on_ground_lagos" : "to_your_doorstep",
@@ -92,6 +121,8 @@ export function quote(
     price_display: formatMillions(price),
     lowest_price_ngn: lowest,
     lowest_price_display: formatMillions(lowest),
+    first_offer_ngn: firstOffer,
+    first_offer_display: formatMillions(firstOffer),
     deposit_pct: Math.round(pct * 10_000) / 100,
     deposit_ngn: deposit,
     deposit_display: formatNaira(deposit),

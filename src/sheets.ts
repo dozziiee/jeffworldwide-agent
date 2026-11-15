@@ -2,6 +2,7 @@
 // Uses the Sheets REST API directly with a service-account JWT (no heavy SDK).
 
 import { createPrivateKey, createSign, type KeyObject } from "node:crypto";
+import { HEADERS } from "./config/constants";
 import { requestJson, requireEnv, ServiceUnavailable } from "./http";
 import type { CostsUsd, Settings } from "./pricing";
 
@@ -66,9 +67,20 @@ export function parseSettings(rows: unknown[][]): Settings {
     console.warn(`[sheet] Settings tab has no valid ${name} row; using 0`);
     return 0;
   };
+  // The discount needs all three rows. If any is missing or invalid, there is no discount.
+  const discountRows = { discount_pct: toFraction(map.get("discount_pct")), discount_min_ngn: toNumber(map.get("discount_min_ngn")), discount_max_ngn: toNumber(map.get("discount_max_ngn")) };
+  const badDiscount = Object.entries(discountRows).filter(([, value]) => !Number.isFinite(value) || value < 0).map(([name]) => name);
+  if (badDiscount.length) {
+    console.warn(`[sheet] Settings tab has no valid ${badDiscount.join(", ")} row; using no discount`);
+  }
+  const discount = badDiscount.length ? { discountPct: 0, discountMinNgn: 0, discountMaxNgn: 0 } : {
+    discountPct: discountRows.discount_pct,
+    discountMinNgn: discountRows.discount_min_ngn,
+    discountMaxNgn: discountRows.discount_max_ngn,
+  };
   const settings: Settings = {
     doorstepDeliveryNgn: optional("doorstep_delivery_ngn"),
-    maxDiscountNgn: optional("max_discount_ngn"),
+    ...discount,
     fxRateNgnPerUsd: toNumber(map.get("fx_rate_ngn_per_usd")),
     marginPct: toFraction(map.get("margin_pct")),
     depositPctInStock: toFraction(map.get("deposit_pct_in_stock")),
@@ -318,7 +330,7 @@ async function fetchToken(): Promise<string> {
 
   const res = await googleRequest("Google", "https://oauth2.googleapis.com/token", {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers: { [HEADERS.CONTENT_TYPE]: "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
       assertion: `${unsigned}.${signature}`,
@@ -349,7 +361,7 @@ export async function sheetsRequest(path: string, init: RequestInit = {}, retry 
   const res = await googleRequest(
     "Google Sheets",
     `${API}/${requireEnv("GOOGLE_SHEET_ID")}${separator}${path}`,
-    { ...init, headers: { authorization: `Bearer ${token}`, "content-type": "application/json" } },
+    { ...init, headers: { [HEADERS.AUTHORIZATION]: `Bearer ${token}`, [HEADERS.CONTENT_TYPE]: "application/json" } },
     retry,
   );
   if (!res.ok) throw new SheetsApiError(res.status, String(res.body?.error?.message ?? ""));

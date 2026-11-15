@@ -3,7 +3,7 @@ import { renderCarPage, renderMessagePage } from "./carPage";
 import { quote } from "./pricing";
 import type { Car } from "./sheets";
 
-const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 100_000, maxDiscountNgn: 500_000 };
+const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 100_000, discountPct: 0.015, discountMinNgn: 200_000, discountMaxNgn: 2_000_000 };
 
 const base: Car = {
   row: 2, car_id: "JW-065", make: "Toyota", model: "Highlander", year: 2021, trim: "XSE AWD", colour: "Blue", interior: "Black", mileage: "42800",
@@ -65,7 +65,7 @@ describe("car page", () => {
   it("never shows costs, margin, the lowest price or reservation details", () => {
     for (const html of [render(), render(preOrder)].map(content)) {
       // Lowest prices (42.4m / 57.4m), deposits, cost inputs, FX, margin, reference, status, payment link.
-      expect(html).not.toMatch(/42\.4m|57\.4m|lowest|deposit|12,870,000|28,950,000|20,?000|1,?500|usd|margin|fx|JW-065-1794755450557|reserved|pending|paystack|secret-link/i);
+      expect(html).not.toMatch(/42\.26m|42\.64m|57\.04m|57\.55m|lowest|first.?offer|deposit|12,870,000|28,950,000|20,?000|1,?500|usd|margin|fx|JW-065-1794755450557|reserved|pending|paystack|secret-link/i);
     }
   });
 
