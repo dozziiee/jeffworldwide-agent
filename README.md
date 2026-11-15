@@ -19,6 +19,7 @@ Customers only ever see final naira figures. Cost columns, the FX rate and the m
 
 - `POST /mcp`: MCP over Streamable HTTP, stateless. Requires `Authorization: Bearer <MCP_AUTH_TOKEN>`; anything else gets 401.
 - `GET /health`: returns `ok`.
+- `GET /car/:car_id`: a public, mobile-friendly page for one car (no auth). Unknown IDs get a 404 page.
 
 ## Layout
 
@@ -30,10 +31,13 @@ src/sheets.ts    Google Sheets read/write, row parsing, and the Logs, Market, Ph
 src/paystack.ts  Paystack initialize and verify
 src/tools.ts     the tools, logging and error handling
 src/alerts.ts    the WhatsApp team alert, sent through Twilio
-src/app.ts       Express app: auth, /mcp, /health
+src/carPage.ts   the public car page (HTML)
+src/vin.ts       demo VIN building and check-digit validation
+src/app.ts       Express app: auth, /mcp, /health, /car/:car_id
 src/local.ts     local entry point
 api/index.ts     Vercel entry point
-scripts/fetch-photos.ts   one-off script that fills the Photos tab from Wikimedia Commons
+scripts/fetch-photos.ts          one-off script that fills the Photos tab from Wikimedia Commons
+scripts/add-vehicle-history.ts   one-off script that adds demo VINs and history columns to Inventory
 ```
 
 ## Environment variables
@@ -50,6 +54,7 @@ scripts/fetch-photos.ts   one-off script that fills the Photos tab from Wikimedi
 | `TWILIO_WHATSAPP_FROM` | The WhatsApp sender, for example `whatsapp:+14155238886`. |
 | `ALERT_WHATSAPP_TO` | The team's WhatsApp number that receives alerts, in the same format. |
 | `TWILIO_CONTENT_SID` | Optional. An approved WhatsApp template (`HX...`) with one variable, `{{1}}`. |
+| `PUBLIC_BASE_URL` | Optional. The server's public address, used in links to car pages. If not set, it is taken from the incoming request. |
 
 Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commit secrets.
 
@@ -61,6 +66,7 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 
 - `status`: `in_stock`, `in_us` or `on_water` (the last two are pre-orders).
 - `reservation_status`: `available`, `pending_payment`, `reserved` or `payment_review`. Blank counts as `available`.
+- Four history columns, filled by a one-off script (see Vehicle history): `vin`, `title_status`, `owners`, `accidents_reported`.
 - The server adds and maintains three more columns after these: `agreed_price_ngn` (a negotiated price), `payment_url` (the Paystack link for a pending payment) and `review_until` (when a payment review hold ends).
 - Rows that cannot be parsed (no `car_id`, unknown status, missing price or costs) are skipped and logged.
 
@@ -111,9 +117,28 @@ Columns: `make, model, year, condition, low_ngn, high_ngn, listings_count, sourc
 - `source_name` is derived from the `source_url` domain (`jiji.ng` → Jiji, `cars45.com` → Cars45, `autochek.africa` → Autochek, `afrotools.com` → Afrotools); if the matched rows come from several sources, they are listed. `condition` is passed through the same way (`foreign_used`, `mixed`).
 - No comparable rows → `no_comparison`. Unknown car → `car_not_found`.
 
+## Vehicle history and the car page
+
+Each car in a `search_inventory` result carries `vin`, `title_status`, `owners` and `accidents_reported`, read from the Inventory tab, plus `photo_link`: the address of that car's public page, `<base url>/car/<car_id>`. `photo_link` is empty when the model has no photo.
+
+The page at `/car/<car_id>` needs no login and is made to be shared in a chat. It shows the car's title, colour, mileage, price ("to your doorstep" for pre-orders, "on ground in Lagos" for in-stock cars), a photo of the model, the VIN, and a Vehicle history box (title, owners, accidents). It has `og:title` and `og:image` tags so WhatsApp shows a preview, and small print saying it is a demo listing, crediting the photo, and noting that the history data is illustrative. It never shows costs, margin, the lowest price or anything about reservations.
+
+The history columns are demo data, written once by a script:
+
+```bash
+npm run add-vehicle-history
+```
+
+- `vin`: a synthetic 17-character VIN. It has a realistic manufacturer prefix for the make and model, the correct model-year code in position 10 and a valid check digit in position 9, with no I, O or Q. Positions 12 to 17 are "JW" plus the four-digit car number (`JW0065`), so it is plainly a demo VIN and cannot match a real vehicle.
+- `title_status`: "Clean" for every car.
+- `owners`: 1 to 3, weighted towards 1 and 2.
+- `accidents_reported`: "None reported" for 85 of the 100 cars; the rest have one minor bumper repair.
+
+The random seed is fixed, so running the script again writes the same values. It writes only those four columns. Add `-- --dry-run` to print a summary without writing.
+
 ## Photos
 
-Each car in a `search_inventory` result carries `photo_url`, `photo_page_url` (the Wikimedia Commons file page) and `photo_credit` ("Photo: <author>, <licence>, via Wikimedia Commons"), matched on make + model from the **Photos** tab. All three are empty strings when there is no photo. Each car also has `mileage_display`, for example "42,800 miles". The photo is a representative picture of the model, not of the exact car.
+The model photo on each car page is matched on make + model from the **Photos** tab. The photo is a representative picture of the model, not of the exact car, and the page credits it ("Photo: <author>, <licence>, via Wikimedia Commons"). Each car in a search result also has `mileage_display`, for example "42,800 miles".
 
 The Photos tab (`make, model, photo_url, page_url, author, licence`) is filled by a one-off script, not by the server:
 

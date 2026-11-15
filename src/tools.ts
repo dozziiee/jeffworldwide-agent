@@ -39,14 +39,14 @@ const referenceTime = (ref: string) => Number(ref.split("-").pop());
 
 // ---------- 1. search_inventory ----------
 
-export async function searchInventory(input: SearchInput): Promise<ToolResult> {
+export async function searchInventory(input: SearchInput, baseUrl = ""): Promise<ToolResult> {
   // A problem reading the Photos tab must not break the search; cars just come back without photos.
   const photos = loadPhotos().catch((err) => {
     console.warn(`[sheet] could not read the Photos tab: ${err instanceof Error ? err.message : err}`);
     return [];
   });
   const { cars, settings } = await loadSheet();
-  return searchCars(cars, settings, input, await photos);
+  return searchCars(cars, settings, input, await photos, baseUrl);
 }
 
 // ---------- 2. create_reservation ----------
@@ -414,7 +414,8 @@ export async function runTool(name: string, input: Record<string, unknown>, fn: 
   return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result };
 }
 
-export function registerTools(server: McpServer) {
+/** baseUrl is the public address of this server, used to build links to car pages. */
+export function registerTools(server: McpServer, baseUrl = "") {
   // Schemas are deliberately lenient: bad values are answered with a `status`, not a protocol error.
   const numberish = z.union([z.number(), z.string()]).optional();
 
@@ -422,7 +423,7 @@ export function registerTools(server: McpServer) {
     "search_inventory",
     {
       description:
-        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. lowest_price_ngn is the negotiation floor: never agree a price below it. photo_url is a representative photo of the model (not this exact car); when you show it, show photo_credit with it (photo_page_url is its Wikimedia Commons page). These are empty when there is no photo. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
+        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. lowest_price_ngn is the negotiation floor: never agree a price below it. photo_link is the public page for that car, with a photo of the model, the VIN and its vehicle history: send that link when the buyer wants to see the car (it is empty when the model has no photo). vin, title_status, owners and accidents_reported are its history details. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
       inputSchema: {
         query: z.string().optional().describe('Free text, e.g. "white GLC 43"'),
         make: z.string().optional(),
@@ -432,7 +433,7 @@ export function registerTools(server: McpServer) {
         stock_type: z.string().optional().describe("in_stock or pre_order"),
       },
     },
-    (input) => runTool("search_inventory", input, () => searchInventory(input)),
+    (input) => runTool("search_inventory", input, () => searchInventory(input, baseUrl)),
   );
 
   server.registerTool(

@@ -4,6 +4,10 @@ import { timingSafeEqual } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { renderCarPage, renderMessagePage } from "./carPage";
+import { quote } from "./pricing";
+import { carPageUrl, findPhoto } from "./search";
+import { loadPhotos, loadSheet } from "./sheets";
 import { registerTools } from "./tools";
 
 const rpcError = (code: number, message: string) => ({ jsonrpc: "2.0", error: { code, message }, id: null });
@@ -26,6 +30,33 @@ app.get("/health", (_req, res) => {
   res.type("text/plain").send("ok");
 });
 
+/** The public address of this server: PUBLIC_BASE_URL if set, otherwise worked out from the request. */
+function publicBaseUrl(req: Request): string {
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/+$/, "");
+  const host = req.headers.host ?? "localhost";
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host);
+  return `${local ? "http" : "https"}://${host}`;
+}
+
+// Public car page: no auth, customer-facing details only.
+app.get("/car/:car_id", async (req, res) => {
+  const html = (status: number, body: string) => res.status(status).type("html").send(body);
+  try {
+    const [sheet, photos] = await Promise.all([loadSheet(), loadPhotos().catch(() => [])]);
+    const wanted = String(req.params.car_id).trim().toLowerCase();
+    const car = sheet.cars.find((c) => c.car_id.toLowerCase() === wanted);
+    if (!car) {
+      html(404, renderMessagePage("Car not found", "We could not find that car. It may have been sold, or the link may be incomplete."));
+      return;
+    }
+    res.set("Cache-Control", "public, max-age=300");
+    html(200, renderCarPage(car, quote(car, sheet.settings), findPhoto(photos, car), carPageUrl(publicBaseUrl(req), car.car_id)));
+  } catch (err) {
+    console.error("[car page] failed:", err instanceof Error ? err.message : err);
+    html(503, renderMessagePage("Temporarily unavailable", "This page could not be loaded just now. Please try again in a minute."));
+  }
+});
+
 app.use("/mcp", requireBearer);
 
 app.post("/mcp", async (req, res) => {
@@ -37,7 +68,7 @@ app.post("/mcp", async (req, res) => {
     void server.close();
   });
   try {
-    registerTools(server);
+    registerTools(server, publicBaseUrl(req));
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {

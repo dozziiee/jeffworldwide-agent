@@ -68,7 +68,16 @@ export function mileageDisplay(mileage: string): string {
   return Number.isFinite(miles) ? `${Math.round(miles).toLocaleString("en-US")} miles` : mileage;
 }
 
-function carView(car: Car, q: Quote, photo?: PhotoRow) {
+/** The Photos row for a car's make + model, if it has a photo. */
+export function findPhoto(photos: PhotoRow[], car: Car): PhotoRow | undefined {
+  const key = `${normalise(car.make)}|${normalise(car.model)}`;
+  return photos.find((p) => p.photo_url && `${normalise(p.make)}|${normalise(p.model)}` === key);
+}
+
+/** The public page for a car: "<base url>/car/<car_id>". */
+export const carPageUrl = (baseUrl: string, carId: string) => `${baseUrl.replace(/\/+$/, "")}/car/${encodeURIComponent(carId)}`;
+
+function carView(car: Car, q: Quote, photoLink: string) {
   return {
     car_id: car.car_id,
     title: title(car),
@@ -79,10 +88,12 @@ function carView(car: Car, q: Quote, photo?: PhotoRow) {
     ...q,
     location: car.location,
     highlights: car.highlights,
-    // A representative photo of the model, not of this exact car.
-    photo_url: photo?.photo_url ?? "",
-    photo_page_url: photo?.page_url ?? "",
-    photo_credit: photo ? photoCredit(photo) : "",
+    vin: car.vin,
+    title_status: car.title_status,
+    owners: car.owners,
+    accidents_reported: car.accidents_reported,
+    // The car's public page, with a photo of the model and its history. Empty if the model has no photo.
+    photo_link: photoLink,
     ...(q.stock_type === "pre_order" && {
       status: car.status,
       shipping_type: car.shipping_type,
@@ -100,7 +111,13 @@ function countBy<T>(items: T[], key: (item: T) => string | number) {
   return [...counts].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count);
 }
 
-export function searchCars(cars: Car[], settings: Settings, input: SearchInput, photos: PhotoRow[] = []): ToolResult {
+export function searchCars(
+  cars: Car[],
+  settings: Settings,
+  input: SearchInput,
+  photos: PhotoRow[] = [],
+  baseUrl = "",
+): ToolResult {
   // Photos are matched on make + model; rows without a photo_url are ignored.
   const photoFor = new Map(
     photos.filter((p) => p.photo_url).map((p) => [`${normalise(p.make)}|${normalise(p.model)}`, p] as const),
@@ -181,7 +198,9 @@ export function searchCars(cars: Car[], settings: Settings, input: SearchInput, 
 
   const results = matches
     .slice(0, MAX_RESULTS)
-    .map((entry) => carView(entry.car, entry.q, photoFor.get(`${normalise(entry.car.make)}|${entry.model}`)));
+    .map((entry) =>
+      carView(entry.car, entry.q, photoFor.has(`${normalise(entry.car.make)}|${entry.model}`) ? carPageUrl(baseUrl, entry.car.car_id) : ""),
+    );
   const truncated = matches.length > MAX_RESULTS;
   return {
     status: "ok",

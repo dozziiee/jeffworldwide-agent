@@ -29,6 +29,10 @@ export type Car = {
   reservation_ref: string;
   reservation_status: ReservationStatus; // an expired payment_review is read as "available"
   payment_url: string; // the Paystack link for the pending payment, if any
+  vin: string;
+  title_status: string; // e.g. "Clean"
+  owners: string; // number of previous owners, as written in the sheet
+  accidents_reported: string; // e.g. "None reported"
   review_until: string; // ISO time a payment_review hold ends
 };
 
@@ -140,6 +144,10 @@ export function parseCar(columns: Record<string, number>, cells: unknown[], row:
     reservation_status: reservation_status as ReservationStatus,
     payment_url: get("payment_url"),
     review_until: get("review_until"),
+    vin: get("vin"),
+    title_status: get("title_status"),
+    owners: get("owners"),
+    accidents_reported: get("accidents_reported"),
   };
 }
 
@@ -202,10 +210,11 @@ async function accessToken(): Promise<string> {
   return cachedToken.value;
 }
 
-async function sheetsRequest(path: string, init: RequestInit = {}): Promise<any> {
+/** One authenticated call to the Sheets API for this spreadsheet. Exported for the one-off scripts. */
+export async function sheetsRequest(path: string, init: RequestInit = {}): Promise<any> {
   const token = await accessToken();
   // Paths like "values/..." hang off the spreadsheet; ":batchUpdate" is an action on it.
-  const separator = path.startsWith(":") ? "" : "/";
+  const separator = path.startsWith(":") || path.startsWith("?") ? "" : "/";
   const res = await requestJson("Google Sheets", `${API}/${requireEnv("GOOGLE_SHEET_ID")}${separator}${path}`, {
     ...init,
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },

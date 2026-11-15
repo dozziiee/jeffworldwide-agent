@@ -19,7 +19,7 @@ vi.mock("./sheets", async (importOriginal) => ({
 }));
 
 const HEADER =
-  "car_id, make, model, year, trim, colour, interior, mileage, status, price_ngn, location, auction_price_usd, auction_fees_usd, ground_shipping_usd, ocean_shipping_usd, clearing_usd, origin_port, destination_port, shipping_type, expected_berth, highlights, reservation_ref, reservation_status, agreed_price_ngn, payment_url, review_until".split(
+  "car_id, make, model, year, trim, colour, interior, mileage, status, price_ngn, location, auction_price_usd, auction_fees_usd, ground_shipping_usd, ocean_shipping_usd, clearing_usd, origin_port, destination_port, shipping_type, expected_berth, highlights, reservation_ref, reservation_status, agreed_price_ngn, payment_url, review_until, vin, title_status, owners, accidents_reported".split(
     ", ",
   );
 
@@ -32,7 +32,7 @@ function sheetWith(reservation: { ref?: string; status?: string; payment_url?: s
   const rows = [
     HEADER,
     // prettier-ignore
-    ["JW-013", "Mercedes-Benz", "GLC 43", "2018", "AMG Coupe 4MATIC", "White", "Red", "45,000", "in_stock", "59,900,000", "Lagos", "", "", "", "", "", "", "", "", "", "Pano roof", reservation.ref ?? "", reservation.status ?? "available", "", reservation.payment_url ?? "", reservation.review_until ?? ""],
+    ["JW-013", "Mercedes-Benz", "GLC 43", "2018", "AMG Coupe 4MATIC", "White", "Red", "45,000", "in_stock", "59,900,000", "Lagos", "", "", "", "", "", "", "", "", "", "Pano roof", reservation.ref ?? "", reservation.status ?? "available", "", reservation.payment_url ?? "", reservation.review_until ?? "", "W1NDEMO18JAJW0013", "Clean", "2", "None reported"],
     ["JW-014", "Toyota", "Camry", "2020", "XSE", "Black", "Black", "30,000", "on_water", "", "", "20000", "1500", "800", "2200", "10000", "Newark", "Lagos", "RoRo", "2026-12-20", "Clean title", "", ""],
     ["JW-015", "Lexus", "RX 350", "2019", "", "Grey", "Tan", "50,000", "in_stock", "45,000,000", "Abuja", "", "", "", "", "", "", "", "", "", "", "JW-015-1", "reserved"],
     ["JW-016", "Honda", "Accord", "2019", "", "Blue", "", "", "in_stock", "not a price", "", "", "", "", "", "", "", "", "", "", "", "", ""],
@@ -72,9 +72,11 @@ describe("search_inventory", () => {
         deposit_display: "₦17,970,000",
         location: "Lagos",
         highlights: "Pano roof",
-        photo_url: "",
-        photo_page_url: "",
-        photo_credit: "",
+        vin: "W1NDEMO18JAJW0013",
+        title_status: "Clean",
+        owners: "2",
+        accidents_reported: "None reported",
+        photo_link: "",
       },
     ]);
     // JW-015 is reserved and JW-016 is malformed, so neither counts.
@@ -617,7 +619,20 @@ describe("search_inventory photos", () => {
     vi.mocked(sheets.loadPhotos).mockRejectedValue(new Error("no Photos tab"));
     const res = await searchInventory({ query: "glc" });
     expect(res).toMatchObject({ status: "ok", total_matches: 1 });
-    expect((res.results as any[])[0]).toMatchObject({ photo_url: "", photo_credit: "" });
+    expect((res.results as any[])[0]).toMatchObject({ car_id: "JW-013", photo_link: "" });
+  });
+});
+
+describe("search_inventory photo links", () => {
+  it("links to the car page on the server's public address when the model has a photo", async () => {
+    vi.mocked(sheets.loadPhotos).mockResolvedValue([
+      { make: "Mercedes-Benz", model: "GLC 43", photo_url: "https://upload.wikimedia.org/x/1280px-glc.jpg", page_url: "https://commons.wikimedia.org/wiki/File:glc.jpg", author: "Jane Doe", licence: "CC BY-SA 4.0" },
+    ]);
+    const res = await searchInventory({ query: "glc" }, "https://jeff.example.com");
+    const [car] = res.results as any[];
+    expect(car.photo_link).toBe("https://jeff.example.com/car/JW-013");
+    for (const removed of ["photo_url", "photo_page_url", "photo_credit"]) expect(car).not.toHaveProperty(removed);
+    expect(JSON.stringify(res)).not.toContain("wikimedia");
   });
 });
 
