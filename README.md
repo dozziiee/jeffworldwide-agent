@@ -5,11 +5,11 @@ A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord 
 | Tool | What it does | `status` values |
 | --- | --- | --- |
 | `search_inventory` | Free-text and filtered search over cars that are not reserved. Returns up to 5, with final naira price and deposit. | `ok`, `no_match`, `summary` |
-| `create_reservation` | Creates a Paystack deposit link and marks the car `pending_payment`. Accepts an optional negotiated price. | `link_created`, `price_below_minimum`, `car_not_found`, `car_unavailable`, `payment_init_failed`, `invalid_input` |
+| `create_reservation` | Creates a Paystack deposit link and marks the car `pending_payment`. Accepts an optional negotiated price. | `link_created`, `link_exists`, `already_paid`, `price_below_minimum`, `car_not_found`, `car_unavailable`, `payment_init_failed`, `invalid_input` |
 | `compare_market_price` | Compares one car's price with market asking prices from the Market tab. | `ok`, `no_comparison`, `car_not_found`, `invalid_input` |
 | `request_photos` | Records a buyer's request for actual photos of a car in the Requests tab. | `requested`, `car_not_found`, `invalid_input` |
 | `request_callback` | Records a request for the team to call the buyer back, in the Requests tab. | `requested`, `invalid_input` |
-| `confirm_reservation` | Verifies the payment and marks the car `reserved`, or releases it. | `reserved`, `amount_mismatch`, `failed`, `abandoned`, `pending`, `reference_not_found`, `car_unavailable` |
+| `confirm_reservation` | Verifies the payment, by reference or by `car_id`, and marks the car `reserved`, or releases it. | `reserved`, `amount_mismatch`, `failed`, `abandoned`, `pending`, `reference_not_found`, `car_unavailable` |
 
 Every tool returns a JSON object with a `status` and, when something went wrong, a short `message`. Any tool can also return `service_unavailable` (Paystack or Google down, timing out after 10 seconds, or misconfigured) or `error` (unexpected failure). Raw errors never reach the client.
 
@@ -28,7 +28,8 @@ src/search.ts    query normalisation, matching, ordering and result shaping (pur
 src/market.ts    market price comparison (pure function)
 src/sheets.ts    Google Sheets read/write, row parsing, and the Logs, Market, Photos and Requests tabs
 src/paystack.ts  Paystack initialize and verify
-src/tools.ts     the three tools, logging and error handling
+src/tools.ts     the tools, logging and error handling
+src/alerts.ts    the Zapier team alert
 src/app.ts       Express app: auth, /mcp, /health
 src/local.ts     local entry point
 api/index.ts     Vercel entry point
@@ -44,6 +45,7 @@ scripts/fetch-photos.ts   one-off script that fills the Photos tab from Wikimedi
 | `GOOGLE_SHEET_ID` | ID of the sheet (the long string in its URL). |
 | `GOOGLE_SERVICE_ACCOUNT_EMAIL` | Service account email. Share the sheet with it as Editor. |
 | `GOOGLE_PRIVATE_KEY` | The service account's private key, with `\n` between lines. |
+| `ZAPIER_HOOK_URL` | Optional. Zapier webhook that `request_callback` posts each request to, to alert the team. |
 
 Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commit secrets.
 
@@ -54,7 +56,8 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 `car_id, make, model, year, trim, colour, interior, mileage, status, price_ngn, location, auction_price_usd, auction_fees_usd, ground_shipping_usd, ocean_shipping_usd, clearing_usd, origin_port, destination_port, shipping_type, expected_berth, highlights, reservation_ref, reservation_status`
 
 - `status`: `in_stock`, `in_us` or `on_water` (the last two are pre-orders).
-- `reservation_status`: `available`, `pending_payment` or `reserved`. Blank counts as `available`.
+- `reservation_status`: `available`, `pending_payment`, `reserved` or `payment_review`. Blank counts as `available`.
+- The server adds and maintains three more columns after these: `agreed_price_ngn` (a negotiated price), `payment_url` (the Paystack link for a pending payment) and `review_until` (when a payment review hold ends).
 - Rows that cannot be parsed (no `car_id`, unknown status, missing price or costs) are skipped and logged.
 
 **Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock, doorstep_delivery_ngn, max_discount_ngn`. `doorstep_delivery_ngn` and `max_discount_ngn` are optional: if a row is missing it counts as 0 and a warning is logged. Percentages can be written as `0.3`, `30` or `30%`. Settings are read fresh on every tool call.
@@ -71,6 +74,26 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 - `truncated: true` means more than 5 cars matched; `refine_options` then lists the distinct `model`, `year` and `stock_type` values among all matches, with counts, so the agent can ask the buyer to narrow down.
 - `no_match` includes `unmatched_terms`: the words that matched no car at all.
 - With no search words and no filters, the status is `summary`: counts of available cars by make and model (`by_make`) and no car list. The tool never returns "the first five rows".
+
+## Reservations
+
+`create_reservation` first checks the car's state:
+
+- `reserved`, or `payment_review` that has not expired → `car_unavailable`.
+- `pending_payment` with a reference under 30 minutes old → the server asks Paystack about that payment before deciding:
+  - **Paid:** the reservation is finalised. The buyer whose email is on the payment gets `already_paid` with `car_id`, `title`, `deposit_display` and `reference`; anyone else gets `car_unavailable`.
+  - **Unpaid, same email:** `link_exists` with the same `payment_url` and `reference`. Paystack reports a link nobody has paid yet as `abandoned`, so within the 30 minutes that counts as unpaid.
+  - **Unpaid, different email:** `car_unavailable`, "Another buyer has a payment in progress for this car."
+  - **Failed** (or unknown to Paystack): the car is freed and a new link is created as normal.
+- Otherwise a new link is created.
+
+`link_created`, `link_exists` and `already_paid` all include `reference_line`, for example "Ref: JW-091-1794755450557"; so does `reserved` from `confirm_reservation`.
+
+`confirm_reservation` takes a `reference`, or a `car_id`, in which case it uses the `reservation_ref` on that car's row. If neither gives a usable reference it returns `reference_not_found`.
+
+### Payment review
+
+A `request_callback` with the reason "payment dispute" and an identifiable car (from `car_id`, or from the `reference`) sets that row's `reservation_status` to `payment_review` and `review_until` to 24 hours ahead. Until then the car is treated like a reserved one: hidden from search and refused by `create_reservation`. Once `review_until` passes, the car is on sale again without anyone editing the sheet. A successful `confirm_reservation` during the review reserves the car; a failed or abandoned one leaves the hold in place. A car that is already `reserved` is not changed by a dispute.
 
 ## Market comparison
 
@@ -100,10 +123,12 @@ It reads the distinct make + model pairs from Inventory, searches Wikimedia Comm
 
 Two tools append rows to a **Requests** tab (created with headers if missing) for the team to work through:
 
-`timestamp_utc, car_id, title, request_type, reason, note, status`
+`timestamp_utc, car_id, title, request_type, reason, note, status, reference`
 
-- `request_photos` takes a `car_id` and records `request_type` "photos" with `status` "open"; `reason` and `note` are left empty.
-- `request_callback` takes a `reason` (required, for example "negotiation", "viewing", "photos", "deposit paid", "refund"), plus an optional `car_id` and `note` (for example the price the buyer wants), and records `request_type` "callback" with `status` "open". If the `car_id` is not in the inventory the request is still recorded, without a title, so it is never lost.
+- `request_photos` takes a `car_id` and records `request_type` "photos" with `status` "open"; `reason`, `note` and `reference` are left empty.
+- `request_callback` takes a `reason` (required, for example "negotiation", "viewing", "photos", "deposit paid", "refund", "payment dispute"), plus an optional `car_id`, `reference` (a payment reference) and `note` (for example the price the buyer wants), and records `request_type` "callback" with `status` "open". If no `car_id` is given, the car is worked out from the reference. If the car is not in the inventory the request is still recorded, without a title, so it is never lost.
+
+After the row is written, `request_callback` POSTs the request as JSON (`reason, car_id, title, reference, note, timestamp_utc`) to `ZAPIER_HOOK_URL`, with a 5-second timeout. If the variable is not set or the POST fails, a warning is logged and the tool still returns `requested`.
 
 ## Logs tab
 

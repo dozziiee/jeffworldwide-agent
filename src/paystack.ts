@@ -44,7 +44,14 @@ export async function initializeTransaction(input: {
 
 export type VerifyResult =
   | { found: false }
-  | { found: true; status: string; amountNgn: number; paidAt: string | null; metadata: Partial<ReservationMetadata> };
+  | {
+      found: true;
+      status: string;
+      amountNgn: number;
+      paidAt: string | null;
+      customerEmail: string;
+      metadata: Partial<ReservationMetadata>;
+    };
 
 export async function verifyTransaction(reference: string): Promise<VerifyResult> {
   const res = await requestJson("Paystack", `${API}/transaction/verify/${encodeURIComponent(reference)}`, {
@@ -67,6 +74,7 @@ export async function verifyTransaction(reference: string): Promise<VerifyResult
     status: String(data.status),
     amountNgn: Number(data.amount) / 100,
     paidAt: data.paid_at ?? null,
+    customerEmail: String(data.customer?.email ?? ""),
     metadata: metadata ?? {},
   };
 }

@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as alerts from "./alerts";
 import { ServiceUnavailable } from "./http";
 import { sourceName } from "./market";
 import * as paystack from "./paystack";
 import * as sheets from "./sheets";
 import { compareMarketPrice, confirmReservation, createReservation, requestCallback, requestPhotos, maskEmails, runTool, searchInventory } from "./tools";
 
+vi.mock("./alerts");
 vi.mock("./paystack");
 vi.mock("./sheets", async (importOriginal) => ({
   ...(await importOriginal<typeof sheets>()),
@@ -17,17 +19,20 @@ vi.mock("./sheets", async (importOriginal) => ({
 }));
 
 const HEADER =
-  "car_id, make, model, year, trim, colour, interior, mileage, status, price_ngn, location, auction_price_usd, auction_fees_usd, ground_shipping_usd, ocean_shipping_usd, clearing_usd, origin_port, destination_port, shipping_type, expected_berth, highlights, reservation_ref, reservation_status".split(
+  "car_id, make, model, year, trim, colour, interior, mileage, status, price_ngn, location, auction_price_usd, auction_fees_usd, ground_shipping_usd, ocean_shipping_usd, clearing_usd, origin_port, destination_port, shipping_type, expected_berth, highlights, reservation_ref, reservation_status, agreed_price_ngn, payment_url, review_until".split(
     ", ",
   );
 
+const RELEASED = { reservation_ref: "", reservation_status: "available", agreed_price_ngn: "", payment_url: "", review_until: "" };
+const HOUR = 3_600_000;
+
 const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, maxDiscountNgn: 500_000 };
 
-function sheetWith(reservation: { ref?: string; status?: string } = {}) {
+function sheetWith(reservation: { ref?: string; status?: string; payment_url?: string; review_until?: string } = {}) {
   const rows = [
     HEADER,
     // prettier-ignore
-    ["JW-013", "Mercedes-Benz", "GLC 43", "2018", "AMG Coupe 4MATIC", "White", "Red", "45,000", "in_stock", "59,900,000", "Lagos", "", "", "", "", "", "", "", "", "", "Pano roof", reservation.ref ?? "", reservation.status ?? "available"],
+    ["JW-013", "Mercedes-Benz", "GLC 43", "2018", "AMG Coupe 4MATIC", "White", "Red", "45,000", "in_stock", "59,900,000", "Lagos", "", "", "", "", "", "", "", "", "", "Pano roof", reservation.ref ?? "", reservation.status ?? "available", "", reservation.payment_url ?? "", reservation.review_until ?? ""],
     ["JW-014", "Toyota", "Camry", "2020", "XSE", "Black", "Black", "30,000", "on_water", "", "", "20000", "1500", "800", "2200", "10000", "Newark", "Lagos", "RoRo", "2026-12-20", "Clean title", "", ""],
     ["JW-015", "Lexus", "RX 350", "2019", "", "Grey", "Tan", "50,000", "in_stock", "45,000,000", "Abuja", "", "", "", "", "", "", "", "", "", "", "JW-015-1", "reserved"],
     ["JW-016", "Honda", "Accord", "2019", "", "Blue", "", "", "in_stock", "not a price", "", "", "", "", "", "", "", "", "", "", "", "", ""],
@@ -90,16 +95,22 @@ describe("create_reservation", () => {
       amountNgn: 17_970_000,
       metadata: { car_id: "JW-013", customer_name: "Ada", price_ngn: 59_900_000, deposit_ngn: 17_970_000, stock_type: "in_stock" },
     });
-    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ car_id: "JW-013" }), res.reference, "pending_payment", "");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ car_id: "JW-013" }), {
+      reservation_ref: res.reference,
+      reservation_status: "pending_payment",
+      agreed_price_ngn: "",
+      payment_url: "https://pay/abc",
+      review_until: "",
+    });
+    expect(res.reference_line).toBe(`Ref: ${res.reference}`);
     expect(res).not.toHaveProperty("agreed_price_ngn");
     expect(vi.mocked(paystack.initializeTransaction).mock.calls[0][0].metadata).not.toHaveProperty("agreed_price_ngn");
   });
 
-  it("returns car_not_found, and car_unavailable for reserved or freshly pending cars", async () => {
+  it("returns car_not_found, and car_unavailable for reserved cars", async () => {
     expect((await createReservation({ ...input, car_id: "nope" })).status).toBe("car_not_found");
-    expect((await createReservation({ ...input, car_id: "JW-015" })).status).toBe("car_unavailable");
-    vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ ref: `JW-013-${Date.now() - 60_000}`, status: "pending_payment" }));
-    expect((await createReservation(input)).status).toBe("car_unavailable");
+    expect(await createReservation({ ...input, car_id: "JW-015" })).toEqual({ status: "car_unavailable", message: "This car is already reserved." });
+    expect(paystack.verifyTransaction).not.toHaveBeenCalled();
     expect(paystack.initializeTransaction).not.toHaveBeenCalled();
   });
 
@@ -107,6 +118,7 @@ describe("create_reservation", () => {
     vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ ref: `JW-013-${Date.now() - 31 * 60_000}`, status: "pending_payment" }));
     vi.mocked(paystack.initializeTransaction).mockResolvedValue({ ok: true, payment_url: "https://pay/abc" });
     expect((await createReservation(input)).status).toBe("link_created");
+    expect(paystack.verifyTransaction).not.toHaveBeenCalled(); // too old to matter: no need to ask Paystack
   });
 
   it("leaves the row unchanged when Paystack rejects", async () => {
@@ -135,7 +147,7 @@ describe("create_reservation with an agreed price", () => {
       amountNgn: 17_895_000,
       metadata: { price_ngn: 59_900_000, agreed_price_ngn: 59_650_000, deposit_ngn: 17_895_000 },
     });
-    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ car_id: "JW-013" }), res.reference, "pending_payment", 59_650_000);
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ car_id: "JW-013" }), expect.objectContaining({ reservation_status: "pending_payment", agreed_price_ngn: 59_650_000 }));
   });
 
   it("accepts the floor and the quoted price exactly, and amounts typed with commas", async () => {
@@ -168,13 +180,13 @@ describe("request_callback", () => {
   it("records a callback for a car, with reason and note", async () => {
     const res = await requestCallback({ reason: "negotiation", car_id: "jw-013", note: "Buyer wants 58m" });
     expect(res).toMatchObject({ status: "requested", request_type: "callback", reason: "negotiation", car_id: "JW-013", title: "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC" });
-    expect(rows()).toEqual([["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "callback", "negotiation", "Buyer wants 58m", "open"]]);
+    expect(rows()).toEqual([["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "callback", "negotiation", "Buyer wants 58m", "open", ""]]);
     expect(vi.mocked(sheets.appendRequest).mock.calls[0][0][0]).toMatch(/^\d{4}-\d\d-\d\dT/);
   });
 
   it("works without a car or a note, and does not read the inventory", async () => {
     expect(await requestCallback({ reason: "refund" })).toMatchObject({ status: "requested", reason: "refund" });
-    expect(rows()).toEqual([["", "", "callback", "refund", "", "open"]]);
+    expect(rows()).toEqual([["", "", "callback", "refund", "", "open", ""]]);
     expect(sheets.loadSheet).not.toHaveBeenCalled();
   });
 
@@ -182,7 +194,7 @@ describe("request_callback", () => {
     const res = await requestCallback({ reason: "viewing", car_id: "JW-999" });
     expect(res.status).toBe("requested");
     expect(res.message).toContain("JW-999");
-    expect(rows()).toEqual([["JW-999", "", "callback", "viewing", "", "open"]]);
+    expect(rows()).toEqual([["JW-999", "", "callback", "viewing", "", "open", ""]]);
   });
 
   it("requires a reason", async () => {
@@ -191,11 +203,253 @@ describe("request_callback", () => {
   });
 });
 
+describe("create_reservation when a payment is already pending", () => {
+  const input = { car_id: "JW-013", customer_name: "Ada", customer_email: "Ada@Example.com" };
+  const pendingRef = `JW-013-${Date.now() - 5 * 60_000}`; // started 5 minutes ago
+  const pendingSheet = (payment_url = "https://checkout.paystack.com/old") => sheetWith({ ref: pendingRef, status: "pending_payment", payment_url });
+  const paystackSays = (status: string, customerEmail = "ada@example.com", amountNgn = 17_970_000) =>
+    vi.mocked(paystack.verifyTransaction).mockResolvedValue({
+      found: true,
+      status,
+      amountNgn,
+      paidAt: status === "success" ? "2026-11-12T10:00:00.000Z" : null,
+      customerEmail,
+      metadata: { car_id: "JW-013", deposit_ngn: 17_970_000 },
+    });
+
+  beforeEach(() => {
+    vi.mocked(sheets.loadSheet).mockResolvedValue(pendingSheet());
+    vi.mocked(paystack.initializeTransaction).mockResolvedValue({ ok: true, payment_url: "https://checkout.paystack.com/new" });
+  });
+
+  it("checks the pending reference with Paystack first", async () => {
+    paystackSays("abandoned");
+    await createReservation(input);
+    expect(paystack.verifyTransaction).toHaveBeenCalledWith(pendingRef);
+  });
+
+  it("paid by this buyer: finalises the reservation and returns already_paid", async () => {
+    paystackSays("success");
+    expect(await createReservation(input)).toEqual({
+      status: "already_paid",
+      message: "The deposit for this car has already been paid. The car is reserved.",
+      car_id: "JW-013",
+      title: "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC",
+      deposit_ngn: 17_970_000,
+      deposit_display: "₦17,970,000",
+      reference: pendingRef,
+      reference_line: `Ref: ${pendingRef}`,
+      held_until: "2026-11-14T10:00:00.000Z",
+    });
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), { reservation_ref: pendingRef, reservation_status: "reserved", payment_url: "", review_until: "" });
+    expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+  });
+
+  it("paid by a different buyer: still finalises, but only says the car is reserved", async () => {
+    paystackSays("success", "someone.else@example.com");
+    expect(await createReservation(input)).toEqual({ status: "car_unavailable", message: "This car is already reserved." });
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ reservation_status: "reserved" }));
+    expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+  });
+
+  it("paid, but the amount is wrong: reports amount_mismatch and does not reserve", async () => {
+    paystackSays("success", "ada@example.com", 1_000);
+    expect((await createReservation(input)).status).toBe("amount_mismatch");
+    expect(sheets.writeReservation).not.toHaveBeenCalled();
+  });
+
+  it.each(["abandoned", "ongoing"])("unpaid (%s) and the same email: link_exists with the same link and reference", async (status) => {
+    paystackSays(status);
+    expect(await createReservation(input)).toEqual({
+      status: "link_exists",
+      message: "A payment link already exists for this buyer and car. Send the same link again.",
+      payment_url: "https://checkout.paystack.com/old",
+      reference: pendingRef,
+      reference_line: `Ref: ${pendingRef}`,
+      deposit_ngn: 17_970_000,
+      deposit_display: "₦17,970,000",
+    });
+    expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+    expect(sheets.writeReservation).not.toHaveBeenCalled();
+  });
+
+  it("unpaid and a different email: car_unavailable", async () => {
+    paystackSays("abandoned", "someone.else@example.com");
+    expect(await createReservation(input)).toEqual({ status: "car_unavailable", message: "Another buyer has a payment in progress for this car." });
+    expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+    expect(sheets.writeReservation).not.toHaveBeenCalled();
+  });
+
+  it("failed: frees the car, then creates a new link as normal", async () => {
+    paystackSays("failed", "someone.else@example.com");
+    const res = await createReservation(input);
+    expect(res).toMatchObject({ status: "link_created", payment_url: "https://checkout.paystack.com/new" });
+    expect(res.reference).not.toBe(pendingRef);
+    const writes = vi.mocked(sheets.writeReservation).mock.calls.map(([, , fields]) => fields);
+    expect(writes).toEqual([RELEASED, expect.objectContaining({ reservation_ref: res.reference, reservation_status: "pending_payment" })]);
+  });
+
+  it("reference unknown to Paystack: treated as dead, new link created", async () => {
+    vi.mocked(paystack.verifyTransaction).mockResolvedValue({ found: false });
+    expect((await createReservation(input)).status).toBe("link_created");
+    expect(vi.mocked(sheets.writeReservation).mock.calls[0][2]).toEqual(RELEASED);
+  });
+
+  it("same buyer but no link stored on the row: makes a fresh link", async () => {
+    vi.mocked(sheets.loadSheet).mockResolvedValue(pendingSheet(""));
+    paystackSays("abandoned");
+    expect(await createReservation(input)).toMatchObject({ status: "link_created", payment_url: "https://checkout.paystack.com/new" });
+  });
+});
+
+describe("payment review hold", () => {
+  const input = { car_id: "JW-013", customer_name: "Ada", customer_email: "ada@example.com" };
+  const inReview = (hours: number) => sheetWith({ ref: "JW-013-1700000000000", status: "payment_review", review_until: new Date(Date.now() + hours * HOUR).toISOString() });
+
+  it("an active review is treated like reserved in search and create_reservation", async () => {
+    vi.mocked(sheets.loadSheet).mockResolvedValue(inReview(5));
+    expect(await searchInventory({ query: "glc" })).toMatchObject({ status: "no_match" });
+    expect(await searchInventory({})).toMatchObject({ status: "summary", total_matches: 1 });
+    expect(await createReservation(input)).toEqual({ status: "car_unavailable", message: "This car is on hold while a payment is being reviewed." });
+    expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+  });
+
+  it("an expired review no longer holds the car", async () => {
+    vi.mocked(sheets.loadSheet).mockResolvedValue(inReview(-1));
+    vi.mocked(paystack.initializeTransaction).mockResolvedValue({ ok: true, payment_url: "https://pay/abc" });
+    expect(await searchInventory({ query: "glc" })).toMatchObject({ status: "ok", total_matches: 1 });
+    expect((await createReservation(input)).status).toBe("link_created");
+  });
+
+  it("a review with no end time does not hold the car", async () => {
+    vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ status: "payment_review" }));
+    expect(await searchInventory({ query: "glc" })).toMatchObject({ status: "ok", total_matches: 1 });
+  });
+
+  it("confirm_reservation does not release a car under review, but does reserve it once paid", async () => {
+    const ref = "JW-013-1700000000000";
+    const tx = (status: string) =>
+      vi.mocked(paystack.verifyTransaction).mockResolvedValue({ found: true, status, amountNgn: 17_970_000, paidAt: null, customerEmail: "ada@example.com", metadata: { car_id: "JW-013", deposit_ngn: 17_970_000 } });
+    vi.mocked(sheets.loadSheet).mockResolvedValue(inReview(5));
+
+    tx("abandoned");
+    const res = await confirmReservation({ reference: ref });
+    expect(res.status).toBe("abandoned");
+    expect(res.message).toContain("stays on hold");
+    expect(sheets.writeReservation).not.toHaveBeenCalled();
+
+    tx("success");
+    expect((await confirmReservation({ reference: ref })).status).toBe("reserved");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), { reservation_ref: ref, reservation_status: "reserved", payment_url: "", review_until: "" });
+  });
+});
+
+describe("confirm_reservation by car_id", () => {
+  const ref = "JW-013-1700000000000";
+  beforeEach(() => {
+    vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ ref, status: "pending_payment" }));
+    vi.mocked(paystack.verifyTransaction).mockResolvedValue({ found: true, status: "success", amountNgn: 17_970_000, paidAt: "2026-11-12T10:00:00.000Z", customerEmail: "ada@example.com", metadata: { car_id: "JW-013", deposit_ngn: 17_970_000 } });
+  });
+
+  it("uses the reference recorded on the car's row", async () => {
+    expect(await confirmReservation({ car_id: "jw-013" })).toMatchObject({ status: "reserved", car_id: "JW-013", reference: ref, reference_line: `Ref: ${ref}` });
+    expect(paystack.verifyTransaction).toHaveBeenCalledWith(ref);
+    expect(sheets.loadSheet).toHaveBeenCalledTimes(1); // the sheet is read once, not twice
+  });
+
+  it("prefers an explicit reference over the car_id", async () => {
+    await confirmReservation({ reference: "JW-013-1700000000999", car_id: "JW-014" });
+    expect(paystack.verifyTransaction).toHaveBeenCalledWith("JW-013-1700000000999");
+  });
+
+  it("returns reference_not_found when neither is usable", async () => {
+    for (const input of [{}, { reference: "  " }, { car_id: "JW-999" }, { car_id: "JW-014" }]) {
+      expect((await confirmReservation(input)).status).toBe("reference_not_found");
+    }
+    expect(paystack.verifyTransaction).not.toHaveBeenCalled();
+    vi.mocked(paystack.verifyTransaction).mockResolvedValue({ found: false });
+    expect((await confirmReservation({ car_id: "JW-013" })).status).toBe("reference_not_found");
+  });
+});
+
+describe("request_callback: reference, payment disputes and the team alert", () => {
+  const ref = "JW-013-1700000000000";
+  const lastRow = () => vi.mocked(sheets.appendRequest).mock.calls.at(-1)![0];
+  const reviewWrite = { reservation_status: "payment_review", review_until: expect.stringMatching(/^\d{4}-\d\d-\d\dT/) };
+
+  it("records the reference and identifies the car from it", async () => {
+    vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ ref, status: "pending_payment" }));
+    const res = await requestCallback({ reason: "deposit paid", reference: ref });
+    expect(res).toMatchObject({ status: "requested", car_id: "JW-013", reference: ref });
+    expect(lastRow().slice(1)).toEqual(["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "callback", "deposit paid", "", "open", ref]);
+    expect(sheets.writeReservation).not.toHaveBeenCalled(); // not a dispute, so no hold
+  });
+
+  it("identifies the car from the reference's car id when the row no longer carries it", async () => {
+    const res = await requestCallback({ reason: "refund", reference: "JW-014-1700000000000" });
+    expect(res).toMatchObject({ car_id: "JW-014", title: "2020 Toyota Camry XSE" });
+  });
+
+  it.each([
+    ["car_id", { car_id: "JW-013" }],
+    ["reference", { reference: ref }],
+  ])("payment dispute with a %s: holds the car for 24 hours", async (_label, extra) => {
+    vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ ref, status: "pending_payment" }));
+    const before = Date.now();
+    const res = await requestCallback({ reason: "Payment Dispute", note: "Buyer says they paid", ...extra });
+    expect(res.status).toBe("requested");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ car_id: "JW-013" }), reviewWrite);
+    const until = Date.parse(res.payment_review_until as string);
+    expect(until).toBeGreaterThanOrEqual(before + 24 * HOUR);
+    expect(until).toBeLessThanOrEqual(Date.now() + 24 * HOUR);
+  });
+
+  it("payment dispute with no identifiable car: recorded, nothing held", async () => {
+    expect((await requestCallback({ reason: "payment dispute", note: "no details" })).status).toBe("requested");
+    expect((await requestCallback({ reason: "payment dispute", car_id: "JW-999" })).status).toBe("requested");
+    expect(sheets.writeReservation).not.toHaveBeenCalled();
+    expect(sheets.appendRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it("payment dispute on a car that is already reserved: leaves the reservation alone", async () => {
+    const res = await requestCallback({ reason: "payment dispute", car_id: "JW-015" });
+    expect(res.status).toBe("requested");
+    expect(res).not.toHaveProperty("payment_review_until");
+    expect(sheets.writeReservation).not.toHaveBeenCalled();
+  });
+
+  it("other reasons never hold the car", async () => {
+    await requestCallback({ reason: "negotiation", car_id: "JW-013" });
+    expect(sheets.writeReservation).not.toHaveBeenCalled();
+  });
+
+  it("alerts the team after logging, with the request as JSON fields", async () => {
+    const order: string[] = [];
+    vi.mocked(sheets.appendRequest).mockImplementation(async () => void order.push("logged"));
+    vi.mocked(alerts.sendAlert).mockImplementation(async () => (order.push("alerted"), true));
+    await requestCallback({ reason: "viewing", car_id: "JW-013", reference: ref, note: "Saturday 2pm" });
+    expect(order).toEqual(["logged", "alerted"]);
+    expect(alerts.sendAlert).toHaveBeenCalledWith({
+      reason: "viewing",
+      car_id: "JW-013",
+      title: "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC",
+      reference: ref,
+      note: "Saturday 2pm",
+      timestamp_utc: lastRow()[0],
+    });
+  });
+
+  it("still returns requested when the alert fails", async () => {
+    vi.mocked(alerts.sendAlert).mockResolvedValue(false);
+    expect((await requestCallback({ reason: "refund" })).status).toBe("requested");
+  });
+});
+
 describe("confirm_reservation", () => {
   const ref = "JW-013-1700000000000";
   const metadata = { car_id: "JW-013", deposit_ngn: 17_970_000 };
   const tx = (status: string, amountNgn = 17_970_000) =>
-    vi.mocked(paystack.verifyTransaction).mockResolvedValue({ found: true, status, amountNgn, paidAt: "2026-11-12T10:00:00.000Z", metadata });
+    vi.mocked(paystack.verifyTransaction).mockResolvedValue({ found: true, status, amountNgn, paidAt: "2026-11-12T10:00:00.000Z", customerEmail: "ada@example.com", metadata });
 
   beforeEach(() => vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ ref, status: "pending_payment" })));
 
@@ -206,9 +460,12 @@ describe("confirm_reservation", () => {
       car_id: "JW-013",
       title: "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC",
       deposit_ngn: 17_970_000,
+      deposit_display: "₦17,970,000",
+      reference: ref,
+      reference_line: "Ref: JW-013-1700000000000",
       held_until: "2026-11-14T10:00:00.000Z",
     });
-    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), ref, "reserved");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), { reservation_ref: ref, reservation_status: "reserved", payment_url: "", review_until: "" });
   });
 
   it("does not reserve on an amount mismatch", async () => {
@@ -220,7 +477,7 @@ describe("confirm_reservation", () => {
   it.each(["failed", "abandoned"])("%s: sets the row back to available", async (status) => {
     tx(status);
     expect((await confirmReservation({ reference: ref })).status).toBe(status);
-    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), "", "available", "");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), RELEASED);
   });
 
   it("abandoned within 30 minutes of the link: pending, car stays held", async () => {
@@ -238,7 +495,7 @@ describe("confirm_reservation", () => {
     vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ ref: fresh, status: "pending_payment" }));
     tx("failed");
     expect((await confirmReservation({ reference: fresh })).status).toBe("failed");
-    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), "", "available", "");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), RELEASED);
   });
 
   it("does not release a row that now belongs to a newer payment", async () => {
@@ -346,7 +603,7 @@ describe("request_photos", () => {
     });
     const [row] = vi.mocked(sheets.appendRequest).mock.calls[0];
     expect(row[0]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
-    expect(row.slice(1)).toEqual(["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "photos", "", "", "open"]);
+    expect(row.slice(1)).toEqual(["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "photos", "", "", "open", ""]);
   });
 
   it("unknown car_id: car_not_found, nothing recorded", async () => {

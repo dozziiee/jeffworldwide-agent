@@ -5,7 +5,7 @@ import { createSign } from "node:crypto";
 import { requestJson, requireEnv, ServiceUnavailable } from "./http";
 import type { CostsUsd, Settings } from "./pricing";
 
-export type ReservationStatus = "available" | "pending_payment" | "reserved";
+export type ReservationStatus = "available" | "pending_payment" | "reserved" | "payment_review";
 
 export type Car = {
   row: number; // 1-based row number in the Inventory tab
@@ -27,8 +27,13 @@ export type Car = {
   expected_berth: string;
   highlights: string;
   reservation_ref: string;
-  reservation_status: ReservationStatus;
+  reservation_status: ReservationStatus; // an expired payment_review is read as "available"
+  payment_url: string; // the Paystack link for the pending payment, if any
+  review_until: string; // ISO time a payment_review hold ends
 };
+
+/** Reserved, or on hold while a disputed payment is reviewed: not for sale either way. */
+export const isHeld = (car: Car) => car.reservation_status === "reserved" || car.reservation_status === "payment_review";
 
 export type Sheet = { cars: Car[]; settings: Settings; columns: Record<string, number> };
 
@@ -84,9 +89,13 @@ export function parseCar(columns: Record<string, number>, cells: unknown[], row:
   const status = get("status").toLowerCase();
   if (status !== "in_stock" && status !== "in_us" && status !== "on_water") return `unknown status "${status}"`;
 
-  const reservation_status = get("reservation_status").toLowerCase() || "available";
-  if (!["available", "pending_payment", "reserved"].includes(reservation_status)) {
+  let reservation_status = get("reservation_status").toLowerCase() || "available";
+  if (!["available", "pending_payment", "reserved", "payment_review"].includes(reservation_status)) {
     return `unknown reservation_status "${reservation_status}"`;
+  }
+  // A payment review holds the car only until review_until; after that the car is for sale again.
+  if (reservation_status === "payment_review" && !(Date.parse(get("review_until")) > Date.now())) {
+    reservation_status = "available";
   }
 
   const year = toNumber(get("year"));
@@ -129,6 +138,8 @@ export function parseCar(columns: Record<string, number>, cells: unknown[], row:
     highlights: get("highlights"),
     reservation_ref: get("reservation_ref"),
     reservation_status: reservation_status as ReservationStatus,
+    payment_url: get("payment_url"),
+    review_until: get("review_until"),
   };
 }
 
@@ -220,37 +231,29 @@ function columnLetter(index: number): string {
   return letters;
 }
 
-/**
- * Writes reservation_ref and reservation_status on one car's row.
- * agreedPrice: a number records the negotiated price, "" clears it, undefined leaves it alone.
- * The agreed_price_ngn column is added to the Inventory tab if it is missing.
- */
-export async function writeReservation(
-  sheet: Sheet,
-  car: Car,
-  ref: string,
-  status: ReservationStatus,
-  agreedPrice?: number | "",
-): Promise<void> {
-  const cell = (name: string) => `Inventory!${columnLetter(sheet.columns[name])}${car.row}`;
-  const data = [
-    { range: cell("reservation_ref"), values: [[ref as string | number]] },
-    { range: cell("reservation_status"), values: [[status]] },
-  ];
+export type RowFields = Partial<
+  Record<"reservation_ref" | "reservation_status" | "agreed_price_ngn" | "payment_url" | "review_until", string | number>
+>;
 
-  const hasColumn = "agreed_price_ngn" in sheet.columns;
-  if (agreedPrice !== undefined && (hasColumn || agreedPrice !== "")) {
-    if (!hasColumn) {
+/**
+ * Writes the given reservation columns on one car's row. "" clears a cell.
+ * A column that does not exist yet is added to the Inventory tab, unless it is only being cleared.
+ */
+export async function writeReservation(sheet: Sheet, car: Car, fields: RowFields): Promise<void> {
+  const data = [];
+  for (const [name, value] of Object.entries(fields)) {
+    if (!(name in sheet.columns)) {
+      if (value === "") continue; // nothing to clear
       const index = Math.max(...Object.values(sheet.columns)) + 1; // first free column
       await sheetsRequest(`values/Inventory!${columnLetter(index)}1?valueInputOption=RAW`, {
         method: "PUT",
-        body: JSON.stringify({ values: [["agreed_price_ngn"]] }),
+        body: JSON.stringify({ values: [[name]] }),
       });
-      sheet.columns.agreed_price_ngn = index;
+      sheet.columns[name] = index;
     }
-    data.push({ range: cell("agreed_price_ngn"), values: [[agreedPrice]] });
+    data.push({ range: `Inventory!${columnLetter(sheet.columns[name])}${car.row}`, values: [[value]] });
   }
-
+  if (!data.length) return;
   await sheetsRequest("values:batchUpdate", {
     method: "POST",
     body: JSON.stringify({ valueInputOption: "RAW", data }),
@@ -309,7 +312,7 @@ export const appendLog = (row: (string | number)[]) => appendRow("Logs", LOG_HEA
 
 // ---------- Requests tab ----------
 
-export const REQUEST_HEADERS = ["timestamp_utc", "car_id", "title", "request_type", "reason", "note", "status"];
+export const REQUEST_HEADERS = ["timestamp_utc", "car_id", "title", "request_type", "reason", "note", "status", "reference"];
 
 export const appendRequest = (row: (string | number)[]) => appendRow("Requests", REQUEST_HEADERS, row);
 

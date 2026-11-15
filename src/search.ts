@@ -1,7 +1,7 @@
 // Inventory search: query normalisation, matching, ordering and result shaping. Pure, no I/O.
 
 import { quote, type Quote, type Settings } from "./pricing";
-import { toNumber, type Car, PhotoRow } from "./sheets";
+import { isHeld, toNumber, type Car, PhotoRow } from "./sheets";
 import type { ToolResult } from "./tools";
 
 export type SearchInput = {
@@ -106,9 +106,9 @@ export function searchCars(cars: Car[], settings: Settings, input: SearchInput, 
     photos.filter((p) => p.photo_url).map((p) => [`${normalise(p.make)}|${normalise(p.model)}`, p] as const),
   );
 
-  // Reserved cars are never shown.
+  // Reserved cars, and cars on hold for a payment review, are never shown.
   const available = cars
-    .filter((car) => car.reservation_status !== "reserved")
+    .filter((car) => !isHeld(car))
     .map((car) => ({
       car,
       q: quote(car, settings),
