@@ -5,7 +5,29 @@ import { normalise, title } from "./search";
 import type { Car, MarketRow } from "./sheets";
 import type { ToolResult } from "./tools";
 
-export const MARKET_NOTE = "Jiji figures are asking prices for cars on ground, usually negotiable.";
+export const MARKET_NOTE = "These are asking prices for cars on ground in Nigeria, usually negotiable.";
+
+const SOURCE_NAMES: Record<string, string> = {
+  "jiji.ng": "Jiji",
+  "cars45.com": "Cars45",
+  "autochek.africa": "Autochek",
+  "afrotools.com": "Afrotools",
+};
+
+/** "https://www.cars45.com/listing/..." -> "Cars45". Unknown sites fall back to their domain. */
+export function sourceName(url: string): string {
+  let host = "";
+  try {
+    host = new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+  const known = Object.keys(SOURCE_NAMES).find((domain) => host === domain || host.endsWith(`.${domain}`));
+  return known ? SOURCE_NAMES[known] : host;
+}
+
+/** Distinct non-empty values, in first-seen order, as "a, b". */
+const listDistinct = (values: string[]) => [...new Set(values.filter(Boolean))].join(", ");
 
 export function compareMarket(car: Car, q: Quote, market: MarketRow[]): ToolResult {
   const jeff = {
@@ -47,6 +69,8 @@ export function compareMarket(car: Car, q: Quote, market: MarketRow[]): ToolResu
     market_low_display: formatMillions(low),
     market_high_display: formatMillions(high),
     listings_count: rows.reduce((sum, row) => sum + row.listings_count, 0),
+    source_name: listDistinct(rows.map((row) => sourceName(row.source_url))),
+    condition: listDistinct(rows.map((row) => row.condition)),
     year_matched: year,
     exact_year_match: exact,
     collected_on: latest.collected_on,

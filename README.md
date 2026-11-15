@@ -1,12 +1,13 @@
 # Jeffworldwide MCP server
 
-A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord AI teammate four tools for selling Jeffworldwide's cars. Chord is the MCP client. The "Jeffworldwide inventory" Google Sheet is the only data store, and Paystack takes the deposits.
+A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord AI teammate five tools for selling Jeffworldwide's cars. Chord is the MCP client. The "Jeffworldwide inventory" Google Sheet is the only data store, and Paystack takes the deposits.
 
 | Tool | What it does | `status` values |
 | --- | --- | --- |
 | `search_inventory` | Free-text and filtered search over cars that are not reserved. Returns up to 5, with final naira price and deposit. | `ok`, `no_match`, `summary` |
 | `create_reservation` | Creates a Paystack deposit link and marks the car `pending_payment`. | `link_created`, `car_not_found`, `car_unavailable`, `payment_init_failed`, `invalid_input` |
 | `compare_market_price` | Compares one car's price with market asking prices from the Market tab. | `ok`, `no_comparison`, `car_not_found`, `invalid_input` |
+| `request_photos` | Records a buyer's request for actual photos of a car in the Requests tab. | `requested`, `car_not_found`, `invalid_input` |
 | `confirm_reservation` | Verifies the payment and marks the car `reserved`, or releases it. | `reserved`, `amount_mismatch`, `failed`, `abandoned`, `pending`, `reference_not_found`, `car_unavailable` |
 
 Every tool returns a JSON object with a `status` and, when something went wrong, a short `message`. Any tool can also return `service_unavailable` (Paystack or Google down, timing out after 10 seconds, or misconfigured) or `error` (unexpected failure). Raw errors never reach the client.
@@ -24,12 +25,13 @@ Customers only ever see final naira figures. Cost columns, the FX rate and the m
 src/pricing.ts   X.9 rounding, pre-order price, deposit, "59.9m" formatting (pure functions)
 src/search.ts    query normalisation, matching, ordering and result shaping (pure functions)
 src/market.ts    market price comparison (pure function)
-src/sheets.ts    Google Sheets read/write, row parsing, the Logs tab and the Market tab
+src/sheets.ts    Google Sheets read/write, row parsing, and the Logs, Market, Photos and Requests tabs
 src/paystack.ts  Paystack initialize and verify
 src/tools.ts     the three tools, logging and error handling
 src/app.ts       Express app: auth, /mcp, /health
 src/local.ts     local entry point
 api/index.ts     Vercel entry point
+scripts/fetch-photos.ts   one-off script that fills the Photos tab from Wikimedia Commons
 ```
 
 ## Environment variables
@@ -77,8 +79,25 @@ Columns: `make, model, year, condition, low_ngn, high_ngn, listings_count, sourc
 
 - Rows match on the same make and model and the same year. If there is none for that year, the nearest year within one is used (one year older first, then one year newer) and the response says so (`exact_year_match: false` plus a `message`).
 - Several rows for the same year are combined: lowest low, highest high, listings added up, and the `source_url` and `collected_on` of the most recent row.
-- The response gives Jeff's price and `price_basis`, the market low and high, `difference_vs_low_ngn` (Jeff's price minus the market low), and a note that Jiji figures are asking prices for cars on ground, usually negotiable.
+- The response gives Jeff's price and `price_basis`, the market low and high, `difference_vs_low_ngn` (Jeff's price minus the market low), and a note that these are asking prices for cars on ground in Nigeria, usually negotiable.
+- `source_name` is derived from the `source_url` domain (`jiji.ng` → Jiji, `cars45.com` → Cars45, `autochek.africa` → Autochek, `afrotools.com` → Afrotools); if the matched rows come from several sources, they are listed. `condition` is passed through the same way (`foreign_used`, `mixed`).
 - No comparable rows → `no_comparison`. Unknown car → `car_not_found`.
+
+## Photos
+
+Each car in a `search_inventory` result carries `photo_url` and `photo_credit` ("Photo: <author>, <licence>, via Wikimedia Commons"), matched on make + model from the **Photos** tab. Both are empty strings when there is no photo. The photo is a representative picture of the model, not of the exact car.
+
+The Photos tab (`make, model, photo_url, page_url, author, licence`) is filled by a one-off script, not by the server:
+
+```bash
+npm run fetch-photos
+```
+
+It reads the distinct make + model pairs from Inventory, searches Wikimedia Commons for each, and accepts only JPEGs licensed CC BY, CC BY-SA or public domain (CC0). It prefers file names that state the right model and a model year close to the inventory's, and rejects interiors, details, other body styles and other generations. `photo_url` is a direct 1280px link on `upload.wikimedia.org`. Models with nothing suitable get an empty `photo_url` and are listed at the end. Add `-- --dry-run` to print the picks without writing. The picks are automatic, so check them; any row can be corrected by hand in the sheet. Running the script again replaces the whole tab.
+
+## Photo requests
+
+`request_photos` takes a `car_id` and appends a row to a **Requests** tab (created with headers if missing): `timestamp_utc, car_id, title, request_type` ("photos")`, status` ("open"). The team works through the open rows.
 
 ## Logs tab
 
@@ -157,6 +176,42 @@ Go-live points:
 - Deposits of this size may not go through by card. Check Paystack's live limits (and typical customer card limits) for large amounts, and expect customers to pay large deposits by bank transfer. Chord should suggest transfer if a card is declined.
 - A declined attempt does not close the link: the customer can retry or switch method on the same checkout. If `confirm_reservation` runs between a decline and the retry, it returns `failed` and frees the car; a later successful payment on that link is still honoured when confirmed, unless someone else reserved the car in between.
 - Switch `PAYSTACK_SECRET_KEY` to the live key only at go-live; the code is the same.
+
+## Photo credits
+
+Model photos in search results come from [Wikimedia Commons](https://commons.wikimedia.org). They are representative pictures of each model, not of the cars for sale. Each is used under the licence shown; follow the link for the original file and full licence terms.
+
+| Model | Author | Licence | Source |
+| --- | --- | --- | --- |
+| Mercedes-Benz GLC 43 AMG | EurovisionNim | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2017_Mercedes-Benz_GLC_43_AMG_%28X_253%29_4MATIC_wagon_%282018-10-08%29_02.jpg) |
+| Mercedes-Benz GLE 350 | Kevauto | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2020_Mercedes-Benz_GLE_350_4Matic_front_6.16.19.jpg) |
+| Mercedes-Benz GLE 450 | Autobilder Gratis | CC BY 2.0 | [Commons](https://commons.wikimedia.org/wiki/File:Mercedes_GLE_450_4Matic_Photo_2020_Free_image_%2849647801197%29.jpg) |
+| Mercedes-Benz GLE 53 AMG | Chanokchon | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2021_Mercedes-AMG_GLE_53_4MATIC%2B.jpg) |
+| Mercedes-Benz GLE 63 S AMG | Charles from Port Chester, New York | CC BY 2.0 | [Commons](https://commons.wikimedia.org/wiki/File:Mercedes-Benz_GLE-Klasse_%28V167%29_GLE_63_S_AMG_4MATIC_%282021%29_%2853489900458%29.jpg) |
+| Mercedes-Benz GLC 300 | LuvsMG481 | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2023_Mercedes-Benz_GLC_300_4MATIC_front.jpg) |
+| Mercedes-Benz S-Class S 580 | Charles from Port Chester, New York | CC BY 2.0 | [Commons](https://commons.wikimedia.org/wiki/File:Mercedes-Benz_S-Klasse_%28W223%29_S_580_e_%282022%29_%2853333458825%29.jpg) |
+| Mercedes-Benz Maybach S 580 | Benespit | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:0_Mercedes-Maybach_S_580_2.jpg) |
+| Mercedes-Benz G 63 AMG | Charles from Port Chester, New York | CC BY 2.0 | [Commons](https://commons.wikimedia.org/wiki/File:Mercedes-Benz_G-Klasse_%28W463%29_G_63_AMG_%282021%29_%2853323144370%29.jpg) |
+| Mercedes-Benz E 350 | Charles from Port Chester, New York | CC BY 2.0 | [Commons](https://commons.wikimedia.org/wiki/File:Mercedes-Benz_E-Klasse_%28W213%29_E_350_4MATIC_%282021%29_%2853646420160%29.jpg) |
+| Lamborghini Urus | MrWalkr | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2022_Lamborghini_Urus_Blue.jpg) |
+| Lamborghini Urus S | Calreyn88 | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:Lamborghini_Urus_S_2023.jpg) |
+| Toyota Camry | Throwawayacc222 | CC0 | [Commons](https://commons.wikimedia.org/wiki/File:2020_Toyota_Camry_XSE_front.jpg) |
+| Toyota Corolla | MercurySable99 | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2021_Toyota_Corolla_LE,_front_right,_07-13-2024.jpg) |
+| Toyota Highlander | Kevauto | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2020_Toyota_Highlander_Platinum_AWD_front_NYIAS_2019.jpg) |
+| Toyota FJ Cruiser | Vauxford | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2014_Toyota_FJ_Cruiser_4.0_Front.jpg) |
+| Tesla Cybertruck | Alexander-93 | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2024_Tesla_Cybertruck_Foundation_Series_IMG_0634_%28cropped%29.jpg) |
+| Lexus RX 350 | RL GNZLZ from Chile | CC BY-SA 2.0 | [Commons](https://commons.wikimedia.org/wiki/File:Lexus_RX_350_F-Sport_2017_%2837205310660%29.jpg) |
+| Lexus LX 570 | Kevauto | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2018_Lexus_LX_570_%28facelift%29,_front_3.24.23.jpg) |
+| Lexus LX 600 | Charles from Port Chester, New York | CC BY 2.0 | [Commons](https://commons.wikimedia.org/wiki/File:Lexus_LX_600_%282024%29_%2853626699099%29.jpg) |
+| Lexus GX 460 | Gematolog | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:Lexus_GX_460_2020-2021.jpg) |
+| Lexus ES 350 | Elise240SX | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2020_Lexus_ES_350_Luxury_Package_in_Eminent_White_Pearl,_Front_Right,_07-13-2023.jpg) |
+| Cadillac Escalade | Mr.choppers | CC BY-SA 3.0 | [Commons](https://commons.wikimedia.org/wiki/File:2021_Cadillac_Escalade_ESV_4WD_Premium_Luxury_in_Satin_Steel_Metallic,_front_right.jpg) |
+| Porsche Macan | Vauxford | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2016_Porsche_Macan_GTS_S-A_3.0_Front.jpg) |
+| Porsche Cayenne | Calreyn88 | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2019_Porsche_Cayenne_S.jpg) |
+| Porsche Cayenne Coupe | DestinationFearFan | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2021_Porsche_Cayenne_Coupe.jpg) |
+| Honda Accord | Bindydad123 | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2020_Honda_Accord_1.5_TC-P_56.jpg) |
+| Honda CR-V | Kevauto | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2020_Honda_CR-V_EX-L_%28facelift%29,_front_11.30.21.jpg) |
+| Honda Pilot | DestinationFearFan | CC BY-SA 4.0 | [Commons](https://commons.wikimedia.org/wiki/File:2021_Honda_Pilot_EX-L.jpg) |
 
 ## How AI tools were used
 

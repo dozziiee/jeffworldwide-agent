@@ -8,5 +8,9 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src", "api"]
+  "include": [
+    "src",
+    "api",
+    "scripts"
+  ]
 }

@@ -1,7 +1,7 @@
 // Inventory search: query normalisation, matching, ordering and result shaping. Pure, no I/O.
 
 import { quote, type Quote, type Settings } from "./pricing";
-import type { Car } from "./sheets";
+import type { Car, PhotoRow } from "./sheets";
 import type { ToolResult } from "./tools";
 
 export type SearchInput = {
@@ -58,7 +58,11 @@ export function queryTerms(query: unknown): string[] {
 
 export const title = (car: Car) => [car.year, car.make, car.model, car.trim].filter(Boolean).join(" ");
 
-function carView(car: Car, q: Quote) {
+/** "Photo: <author>, <licence>, via Wikimedia Commons" */
+export const photoCredit = (photo: PhotoRow) =>
+  `Photo: ${photo.author || "Unknown author"}, ${photo.licence}, via Wikimedia Commons`;
+
+function carView(car: Car, q: Quote, photo?: PhotoRow) {
   return {
     car_id: car.car_id,
     title: title(car),
@@ -68,6 +72,9 @@ function carView(car: Car, q: Quote) {
     ...q,
     location: car.location,
     highlights: car.highlights,
+    // A representative photo of the model, not of this exact car.
+    photo_url: photo?.photo_url ?? "",
+    photo_credit: photo ? photoCredit(photo) : "",
     ...(q.stock_type === "pre_order" && {
       status: car.status,
       shipping_type: car.shipping_type,
@@ -85,7 +92,12 @@ function countBy<T>(items: T[], key: (item: T) => string | number) {
   return [...counts].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count);
 }
 
-export function searchCars(cars: Car[], settings: Settings, input: SearchInput): ToolResult {
+export function searchCars(cars: Car[], settings: Settings, input: SearchInput, photos: PhotoRow[] = []): ToolResult {
+  // Photos are matched on make + model; rows without a photo_url are ignored.
+  const photoFor = new Map(
+    photos.filter((p) => p.photo_url).map((p) => [`${normalise(p.make)}|${normalise(p.model)}`, p] as const),
+  );
+
   // Reserved cars are never shown.
   const available = cars
     .filter((car) => car.reservation_status !== "reserved")
@@ -159,7 +171,9 @@ export function searchCars(cars: Car[], settings: Settings, input: SearchInput):
   const exact = (entry: Entry) => entry.model === model || queryText.includes(` ${entry.model} `);
   matches.sort((a, b) => Number(exact(b)) - Number(exact(a)) || a.q.price_ngn - b.q.price_ngn);
 
-  const results = matches.slice(0, MAX_RESULTS).map((entry) => carView(entry.car, entry.q));
+  const results = matches
+    .slice(0, MAX_RESULTS)
+    .map((entry) => carView(entry.car, entry.q, photoFor.get(`${normalise(entry.car.make)}|${entry.model}`)));
   const truncated = matches.length > MAX_RESULTS;
   return {
     status: "ok",

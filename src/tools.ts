@@ -7,7 +7,7 @@ import { compareMarket } from "./market";
 import { initializeTransaction, verifyTransaction } from "./paystack";
 import { quote } from "./pricing";
 import { searchCars, title, type SearchInput } from "./search";
-import { appendLog, loadMarket, loadSheet, writeReservation, type Car } from "./sheets";
+import { appendLog, appendRequest, loadMarket, loadPhotos, loadSheet, writeReservation, type Car } from "./sheets";
 
 export type ToolResult = { status: string; message?: string; [key: string]: unknown };
 
@@ -22,8 +22,13 @@ const referenceTime = (ref: string) => Number(ref.split("-").pop());
 // ---------- 1. search_inventory ----------
 
 export async function searchInventory(input: SearchInput): Promise<ToolResult> {
+  // A problem reading the Photos tab must not break the search; cars just come back without photos.
+  const photos = loadPhotos().catch((err) => {
+    console.warn(`[sheet] could not read the Photos tab: ${err instanceof Error ? err.message : err}`);
+    return [];
+  });
   const { cars, settings } = await loadSheet();
-  return searchCars(cars, settings, input);
+  return searchCars(cars, settings, input, await photos);
 }
 
 // ---------- 2. create_reservation ----------
@@ -151,6 +156,25 @@ export async function compareMarketPrice(input: { car_id: string }): Promise<Too
   return compareMarket(car, quote(car, sheet.settings), market);
 }
 
+// ---------- 5. request_photos ----------
+
+export async function requestPhotos(input: { car_id: string }): Promise<ToolResult> {
+  if (!String(input.car_id ?? "").trim()) return { status: "invalid_input", message: "car_id is required." };
+
+  const { cars } = await loadSheet();
+  const car = findCar(cars, input.car_id);
+  if (!car) return { status: "car_not_found", message: `No car with id ${input.car_id}.` };
+
+  await appendRequest([new Date().toISOString(), car.car_id, title(car), "photos", "open"]);
+  return {
+    status: "requested",
+    message: "Photo request recorded for the team. Actual photos of this car will be sent when ready.",
+    car_id: car.car_id,
+    title: title(car),
+    request_type: "photos",
+  };
+}
+
 // ---------- wiring ----------
 
 /** "dozie@gmail.com" -> "d***@gmail.com", anywhere inside the inputs. */
@@ -214,7 +238,7 @@ export function registerTools(server: McpServer) {
     "search_inventory",
     {
       description:
-        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
+        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. photo_url is a representative photo of the model (not this exact car); when you show it, show photo_credit with it. Both are empty when there is no photo. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
       inputSchema: {
         query: z.string().optional().describe('Free text, e.g. "white GLC 43"'),
         make: z.string().optional(),
@@ -255,9 +279,19 @@ export function registerTools(server: McpServer) {
     "compare_market_price",
     {
       description:
-        "Compare one of Jeffworldwide's cars with market asking prices for the same make, model and year (or the nearest year within one, flagged by exact_year_match: false). Returns Jeff's price, the market low and high, and difference_vs_low_ngn (Jeff's price minus the market low). Always pass on the note about asking prices. status: ok | no_comparison | car_not_found | invalid_input | service_unavailable.",
+        "Compare one of Jeffworldwide's cars with market asking prices for the same make, model and year (or the nearest year within one, flagged by exact_year_match: false). Returns Jeff's price, the market low and high, source_name (where the figures come from), condition, and difference_vs_low_ngn (Jeff's price minus the market low). Always pass on the note about asking prices. status: ok | no_comparison | car_not_found | invalid_input | service_unavailable.",
       inputSchema: { car_id: z.string() },
     },
     (input) => runTool("compare_market_price", input, () => compareMarketPrice(input)),
+  );
+
+  server.registerTool(
+    "request_photos",
+    {
+      description:
+        "Record a buyer's request for actual photos of a specific car, for Jeffworldwide's team to follow up. Use when the buyer wants real photos beyond the representative model photo. status: requested | car_not_found | invalid_input | service_unavailable.",
+      inputSchema: { car_id: z.string() },
+    },
+    (input) => runTool("request_photos", input, () => requestPhotos(input)),
   );
 }

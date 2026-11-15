@@ -9,7 +9,8 @@
   "scripts": {
     "dev": "node --env-file=.env --import tsx src/local.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "fetch-photos": "node --env-file=.env --import tsx scripts/fetch-photos.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",

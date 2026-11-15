@@ -267,17 +267,63 @@ async function readOrCreateTab(title: string, headers: string[], range = title):
   return rows;
 }
 
-let logsTabReady = false; // checked once per server instance
+const readyTabs = new Set<string>(); // tabs already checked by this server instance
 
-/** Appends one row to the Logs tab. Values are written as plain text, never as formulas. */
-export async function appendLog(row: (string | number)[]): Promise<void> {
-  if (!logsTabReady) {
-    await readOrCreateTab("Logs", LOG_HEADERS, "Logs!A1:H1");
-    logsTabReady = true;
+/** Appends one row to a tab, creating the tab and header first if needed. Values are plain text, never formulas. */
+async function appendRow(title: string, headers: string[], row: (string | number)[]): Promise<void> {
+  if (!readyTabs.has(title)) {
+    await readOrCreateTab(title, headers, `${title}!A1:Z1`);
+    readyTabs.add(title);
   }
-  await sheetsRequest("values/Logs!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS", {
+  await sheetsRequest(`values/${title}!A1:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
     method: "POST",
     body: JSON.stringify({ values: [row] }),
+  });
+}
+
+export const appendLog = (row: (string | number)[]) => appendRow("Logs", LOG_HEADERS, row);
+
+// ---------- Requests tab ----------
+
+export const REQUEST_HEADERS = ["timestamp_utc", "car_id", "title", "request_type", "status"];
+
+export const appendRequest = (row: (string | number)[]) => appendRow("Requests", REQUEST_HEADERS, row);
+
+// ---------- Photos tab ----------
+
+export const PHOTO_HEADERS = ["make", "model", "photo_url", "page_url", "author", "licence"];
+
+export type PhotoRow = { make: string; model: string; photo_url: string; page_url: string; author: string; licence: string };
+
+export function parsePhotos(rows: unknown[][]): PhotoRow[] {
+  const [header = [], ...data] = rows;
+  const columns: Record<string, number> = {};
+  header.forEach((name, i) => (columns[String(name).trim().toLowerCase()] = i));
+  const get = (cells: unknown[], name: string) => String(cells[columns[name]] ?? "").trim();
+  return data
+    .filter((cells) => cells && get(cells, "make") && get(cells, "model"))
+    .map((cells) => ({
+      make: get(cells, "make"),
+      model: get(cells, "model"),
+      photo_url: get(cells, "photo_url"),
+      page_url: get(cells, "page_url"),
+      author: get(cells, "author"),
+      licence: get(cells, "licence"),
+    }));
+}
+
+/** Reads the Photos tab fresh, creating it with headers if it does not exist. */
+export async function loadPhotos(): Promise<PhotoRow[]> {
+  return parsePhotos(await readOrCreateTab("Photos", PHOTO_HEADERS));
+}
+
+/** Replaces a whole tab with a header row plus the given rows. Used by one-off scripts, not by the server. */
+export async function replaceTab(title: string, headers: string[], rows: (string | number)[][]): Promise<void> {
+  await readOrCreateTab(title, headers);
+  await sheetsRequest(`values/${title}:clear`, { method: "POST", body: "{}" });
+  await sheetsRequest(`values/${title}!A1?valueInputOption=RAW`, {
+    method: "PUT",
+    body: JSON.stringify({ values: [headers, ...rows] }),
   });
 }
 

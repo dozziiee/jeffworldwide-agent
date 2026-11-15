@@ -145,6 +145,32 @@ describe("searchCars: the required queries", () => {
   });
 });
 
+describe("searchCars: photos", () => {
+  const photos = [
+    { make: "Honda", model: "Accord", photo_url: "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Accord.jpg/1280px-Accord.jpg", page_url: "https://commons.wikimedia.org/wiki/File:Accord.jpg", author: "Jane Doe", licence: "CC BY-SA 4.0" },
+    { make: "mercedes-benz", model: "g 63 amg", photo_url: "https://upload.wikimedia.org/wikipedia/commons/thumb/c/cd/G63.jpg/1280px-G63.jpg", page_url: "", author: "", licence: "CC0" },
+    { make: "Honda", model: "Civic", photo_url: "", page_url: "", author: "", licence: "" }, // nothing suitable was found
+  ];
+  const find = (query: string) => (searchCars(cars, settings, { query }, photos).results as any[])[0];
+
+  it("adds photo_url and photo_credit, matched on make + model", () => {
+    expect(find("honda accord 2020")).toMatchObject({
+      car_id: "H1",
+      photo_url: "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Accord.jpg/1280px-Accord.jpg",
+      photo_credit: "Photo: Jane Doe, CC BY-SA 4.0, via Wikimedia Commons",
+    });
+    // Case and punctuation do not matter, and a missing author is stated as such.
+    expect(find("g wagon")).toMatchObject({ car_id: "M4", photo_credit: "Photo: Unknown author, CC0, via Wikimedia Commons" });
+  });
+
+  it("returns empty strings when there is no photo", () => {
+    expect(find("civic")).toMatchObject({ car_id: "H3", photo_url: "", photo_credit: "" }); // row with an empty photo_url
+    expect(find("lambo")).toMatchObject({ car_id: "L1", photo_url: "", photo_credit: "" }); // no row at all
+    expect(find("accord hybrid")).toMatchObject({ car_id: "H5", photo_url: "", photo_credit: "" }); // "Accord" must not match "Accord Hybrid"
+    expect((search({ query: "honda accord 2020" }).results as any[])[0]).toMatchObject({ photo_url: "", photo_credit: "" }); // no Photos data
+  });
+});
+
 describe("searchCars: ordering and filters", () => {
   it("puts exact model matches first, then price ascending", () => {
     // "Accord Hybrid" is cheapest but is not an exact match for "accord".

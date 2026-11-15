@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ServiceUnavailable } from "./http";
+import { sourceName } from "./market";
 import * as paystack from "./paystack";
 import * as sheets from "./sheets";
-import { compareMarketPrice, confirmReservation, createReservation, maskEmails, runTool, searchInventory } from "./tools";
+import { compareMarketPrice, confirmReservation, createReservation, requestPhotos, maskEmails, runTool, searchInventory } from "./tools";
 
 vi.mock("./paystack");
 vi.mock("./sheets", async (importOriginal) => ({
@@ -10,6 +11,8 @@ vi.mock("./sheets", async (importOriginal) => ({
   loadSheet: vi.fn(),
   writeReservation: vi.fn(),
   loadMarket: vi.fn(),
+  loadPhotos: vi.fn(),
+  appendRequest: vi.fn(),
   appendLog: vi.fn(),
 }));
 
@@ -38,6 +41,7 @@ beforeEach(() => {
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith());
+  vi.mocked(sheets.loadPhotos).mockResolvedValue([]);
 });
 
 describe("search_inventory", () => {
@@ -60,6 +64,8 @@ describe("search_inventory", () => {
         deposit_display: "₦17,970,000",
         location: "Lagos",
         highlights: "Pano roof",
+        photo_url: "",
+        photo_credit: "",
       },
     ]);
     // JW-015 is reserved and JW-016 is malformed, so neither counts.
@@ -172,9 +178,9 @@ describe("confirm_reservation", () => {
 describe("compare_market_price", () => {
   const MARKET = [
     sheets.MARKET_HEADERS,
-    ["Mercedes-Benz", "GLC 43", 2018, "Foreign used", "52,000,000", "68,000,000", 9, "https://jiji.ng/glc43-2018", "2026-11-10"],
-    ["Mercedes-Benz", "GLC 43", 2018, "Nigerian used", "45,000,000", "58,000,000", 4, "https://jiji.ng/glc43-2018-local", "2026-11-12"],
-    ["Toyota", "Camry", 2019, "Foreign used", "30,000,000", "36,000,000", 12, "https://jiji.ng/camry-2019", "2026-11-11"],
+    ["Mercedes-Benz", "GLC 43", 2018, "foreign_used", "52,000,000", "68,000,000", 9, "https://jiji.ng/glc43-2018", "2026-11-10"],
+    ["Mercedes-Benz", "GLC 43", 2018, "mixed", "45,000,000", "58,000,000", 4, "https://www.cars45.com/listing/glc43-2018", "2026-11-12"],
+    ["Toyota", "Camry", 2019, "foreign_used", "30,000,000", "36,000,000", 12, "https://jiji.ng/camry-2019", "2026-11-11"],
     ["Toyota", "Camry", 2021, "Foreign used", "40,000,000", "47,000,000", 6, "https://jiji.ng/camry-2021", "2026-11-11"],
     ["Toyota", "Camry", 2016, "Foreign used", "18,000,000", "22,000,000", 20, "https://jiji.ng/camry-2016", "2026-11-11"],
     ["Honda", "Accord", "", "Foreign used", "x", "y", 1, "", ""], // malformed, skipped
@@ -194,12 +200,14 @@ describe("compare_market_price", () => {
       market_low_display: "45m",
       market_high_display: "68m",
       listings_count: 13,
+      source_name: "Jiji, Cars45",
+      condition: "foreign_used, mixed",
       year_matched: 2018,
       exact_year_match: true,
       collected_on: "2026-11-12",
-      source_url: "https://jiji.ng/glc43-2018-local",
+      source_url: "https://www.cars45.com/listing/glc43-2018",
       difference_vs_low_ngn: 14_900_000,
-      note: "Jiji figures are asking prices for cars on ground, usually negotiable.",
+      note: "These are asking prices for cars on ground in Nigeria, usually negotiable.",
     });
   });
 
@@ -216,6 +224,8 @@ describe("compare_market_price", () => {
       market_low_ngn: 30_000_000,
       market_high_ngn: 36_000_000,
       listings_count: 12,
+      source_name: "Jiji",
+      condition: "foreign_used",
       difference_vs_low_ngn: 26_990_000,
     });
     expect(res.message).toContain("2019");
@@ -230,6 +240,46 @@ describe("compare_market_price", () => {
 
   it("unknown car_id: car_not_found", async () => {
     expect(await compareMarketPrice({ car_id: "JW-999" })).toEqual({ status: "car_not_found", message: "No car with id JW-999." });
+  });
+});
+
+describe("market source names", () => {
+  it("names the known sources and falls back to the domain", () => {
+    expect(sourceName("https://jiji.ng/cars?query=highlander")).toBe("Jiji");
+    expect(sourceName("https://www.cars45.com/listing/x")).toBe("Cars45");
+    expect(sourceName("https://autochek.africa/ng/cars")).toBe("Autochek");
+    expect(sourceName("https://afrotools.com/car-prices")).toBe("Afrotools");
+    expect(sourceName("https://www.example.ng/cars")).toBe("example.ng");
+    expect(sourceName("not a url")).toBe("");
+  });
+});
+
+describe("request_photos", () => {
+  it("records the request in the Requests tab", async () => {
+    const res = await requestPhotos({ car_id: "jw-013" });
+    expect(res).toMatchObject({
+      status: "requested",
+      car_id: "JW-013",
+      title: "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC",
+      request_type: "photos",
+    });
+    const [row] = vi.mocked(sheets.appendRequest).mock.calls[0];
+    expect(row[0]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+    expect(row.slice(1)).toEqual(["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "photos", "open"]);
+  });
+
+  it("unknown car_id: car_not_found, nothing recorded", async () => {
+    expect(await requestPhotos({ car_id: "JW-999" })).toEqual({ status: "car_not_found", message: "No car with id JW-999." });
+    expect(sheets.appendRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("search_inventory photos", () => {
+  it("still searches when the Photos tab cannot be read", async () => {
+    vi.mocked(sheets.loadPhotos).mockRejectedValue(new Error("no Photos tab"));
+    const res = await searchInventory({ query: "glc" });
+    expect(res).toMatchObject({ status: "ok", total_matches: 1 });
+    expect((res.results as any[])[0]).toMatchObject({ photo_url: "", photo_credit: "" });
   });
 });
 
