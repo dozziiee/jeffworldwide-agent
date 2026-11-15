@@ -10,6 +10,7 @@ export type ReservationMetadata = {
   price_ngn: number;
   deposit_ngn: number;
   stock_type: string;
+  agreed_price_ngn?: number; // only when a price was negotiated
 };
 
 function headers() {

@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { queryTerms, searchCars } from "./search";
+import { mileageDisplay, queryTerms, searchCars } from "./search";
 import { parseInventory, type Car } from "./sheets";
 
 const HEADER =
@@ -7,7 +7,7 @@ const HEADER =
     ", ",
   );
 
-const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0 };
+const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, maxDiscountNgn: 500_000 };
 
 const inStock = (id: string, make: string, model: string, year: number, trim: string, colour: string, interior: string, price: number, reservation = "available") =>
   [id, make, model, year, trim, colour, interior, "30,000", "in_stock", price, "Lagos", "", "", "", "", "", "", "", "", "", "", "", reservation];
@@ -157,6 +157,7 @@ describe("searchCars: photos", () => {
     expect(find("honda accord 2020")).toMatchObject({
       car_id: "H1",
       photo_url: "https://upload.wikimedia.org/wikipedia/commons/thumb/a/ab/Accord.jpg/1280px-Accord.jpg",
+      photo_page_url: "https://commons.wikimedia.org/wiki/File:Accord.jpg",
       photo_credit: "Photo: Jane Doe, CC BY-SA 4.0, via Wikimedia Commons",
     });
     // Case and punctuation do not matter, and a missing author is stated as such.
@@ -164,10 +165,26 @@ describe("searchCars: photos", () => {
   });
 
   it("returns empty strings when there is no photo", () => {
-    expect(find("civic")).toMatchObject({ car_id: "H3", photo_url: "", photo_credit: "" }); // row with an empty photo_url
+    expect(find("civic")).toMatchObject({ car_id: "H3", photo_url: "", photo_page_url: "", photo_credit: "" }); // row with an empty photo_url
     expect(find("lambo")).toMatchObject({ car_id: "L1", photo_url: "", photo_credit: "" }); // no row at all
     expect(find("accord hybrid")).toMatchObject({ car_id: "H5", photo_url: "", photo_credit: "" }); // "Accord" must not match "Accord Hybrid"
     expect((search({ query: "honda accord 2020" }).results as any[])[0]).toMatchObject({ photo_url: "", photo_credit: "" }); // no Photos data
+  });
+});
+
+describe("searchCars: display fields", () => {
+  it("adds the lowest price to each car", () => {
+    const [car] = search({ query: "honda accord 2020" }).results as any[];
+    expect(car).toMatchObject({ price_ngn: 52_000_000, price_display: "52m", lowest_price_ngn: 51_500_000, lowest_price_display: "51.5m" });
+  });
+
+  it("adds mileage_display and keeps the raw mileage", () => {
+    const [car] = search({ query: "honda accord 2020" }).results as any[];
+    expect(car).toMatchObject({ mileage: "30,000", mileage_display: "30,000 miles" });
+    expect(mileageDisplay("42800")).toBe("42,800 miles");
+    expect(mileageDisplay("177500")).toBe("177,500 miles");
+    expect(mileageDisplay("")).toBe("");
+    expect(mileageDisplay("unknown")).toBe("unknown");
   });
 });
 

@@ -50,14 +50,16 @@ export function toFraction(cell: unknown): number {
 
 export function parseSettings(rows: unknown[][]): Settings {
   const map = new Map(rows.map((r) => [String(r[0] ?? "").trim().toLowerCase(), r[1]]));
-  // Optional: a missing or invalid doorstep fee counts as 0.
-  let doorstepDeliveryNgn = toNumber(map.get("doorstep_delivery_ngn"));
-  if (!Number.isFinite(doorstepDeliveryNgn) || doorstepDeliveryNgn < 0) {
-    console.warn("[sheet] Settings tab has no valid doorstep_delivery_ngn row; using 0");
-    doorstepDeliveryNgn = 0;
-  }
+  // Optional settings: a missing or invalid value counts as 0, with a warning.
+  const optional = (name: string) => {
+    const value = toNumber(map.get(name));
+    if (Number.isFinite(value) && value >= 0) return value;
+    console.warn(`[sheet] Settings tab has no valid ${name} row; using 0`);
+    return 0;
+  };
   const settings: Settings = {
-    doorstepDeliveryNgn,
+    doorstepDeliveryNgn: optional("doorstep_delivery_ngn"),
+    maxDiscountNgn: optional("max_discount_ngn"),
     fxRateNgnPerUsd: toNumber(map.get("fx_rate_ngn_per_usd")),
     marginPct: toFraction(map.get("margin_pct")),
     depositPctInStock: toFraction(map.get("deposit_pct_in_stock")),
@@ -218,18 +220,40 @@ function columnLetter(index: number): string {
   return letters;
 }
 
-/** Writes reservation_ref and reservation_status on one car's row. */
-export async function writeReservation(sheet: Sheet, car: Car, ref: string, status: ReservationStatus): Promise<void> {
+/**
+ * Writes reservation_ref and reservation_status on one car's row.
+ * agreedPrice: a number records the negotiated price, "" clears it, undefined leaves it alone.
+ * The agreed_price_ngn column is added to the Inventory tab if it is missing.
+ */
+export async function writeReservation(
+  sheet: Sheet,
+  car: Car,
+  ref: string,
+  status: ReservationStatus,
+  agreedPrice?: number | "",
+): Promise<void> {
   const cell = (name: string) => `Inventory!${columnLetter(sheet.columns[name])}${car.row}`;
+  const data = [
+    { range: cell("reservation_ref"), values: [[ref as string | number]] },
+    { range: cell("reservation_status"), values: [[status]] },
+  ];
+
+  const hasColumn = "agreed_price_ngn" in sheet.columns;
+  if (agreedPrice !== undefined && (hasColumn || agreedPrice !== "")) {
+    if (!hasColumn) {
+      const index = Math.max(...Object.values(sheet.columns)) + 1; // first free column
+      await sheetsRequest(`values/Inventory!${columnLetter(index)}1?valueInputOption=RAW`, {
+        method: "PUT",
+        body: JSON.stringify({ values: [["agreed_price_ngn"]] }),
+      });
+      sheet.columns.agreed_price_ngn = index;
+    }
+    data.push({ range: cell("agreed_price_ngn"), values: [[agreedPrice]] });
+  }
+
   await sheetsRequest("values:batchUpdate", {
     method: "POST",
-    body: JSON.stringify({
-      valueInputOption: "RAW",
-      data: [
-        { range: cell("reservation_ref"), values: [[ref]] },
-        { range: cell("reservation_status"), values: [[status]] },
-      ],
-    }),
+    body: JSON.stringify({ valueInputOption: "RAW", data }),
   });
 }
 
@@ -285,7 +309,7 @@ export const appendLog = (row: (string | number)[]) => appendRow("Logs", LOG_HEA
 
 // ---------- Requests tab ----------
 
-export const REQUEST_HEADERS = ["timestamp_utc", "car_id", "title", "request_type", "status"];
+export const REQUEST_HEADERS = ["timestamp_utc", "car_id", "title", "request_type", "reason", "note", "status"];
 
 export const appendRequest = (row: (string | number)[]) => appendRow("Requests", REQUEST_HEADERS, row);
 

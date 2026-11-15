@@ -1,7 +1,7 @@
 // Inventory search: query normalisation, matching, ordering and result shaping. Pure, no I/O.
 
 import { quote, type Quote, type Settings } from "./pricing";
-import type { Car, PhotoRow } from "./sheets";
+import { toNumber, type Car, PhotoRow } from "./sheets";
 import type { ToolResult } from "./tools";
 
 export type SearchInput = {
@@ -62,6 +62,12 @@ export const title = (car: Car) => [car.year, car.make, car.model, car.trim].fil
 export const photoCredit = (photo: PhotoRow) =>
   `Photo: ${photo.author || "Unknown author"}, ${photo.licence}, via Wikimedia Commons`;
 
+/** "42800" -> "42,800 miles". Anything that is not a number is passed through unchanged. */
+export function mileageDisplay(mileage: string): string {
+  const miles = toNumber(mileage);
+  return Number.isFinite(miles) ? `${Math.round(miles).toLocaleString("en-US")} miles` : mileage;
+}
+
 function carView(car: Car, q: Quote, photo?: PhotoRow) {
   return {
     car_id: car.car_id,
@@ -69,11 +75,13 @@ function carView(car: Car, q: Quote, photo?: PhotoRow) {
     colour: car.colour,
     interior: car.interior,
     mileage: car.mileage,
+    mileage_display: mileageDisplay(car.mileage),
     ...q,
     location: car.location,
     highlights: car.highlights,
     // A representative photo of the model, not of this exact car.
     photo_url: photo?.photo_url ?? "",
+    photo_page_url: photo?.page_url ?? "",
     photo_credit: photo ? photoCredit(photo) : "",
     ...(q.stock_type === "pre_order" && {
       status: car.status,

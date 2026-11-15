@@ -3,7 +3,7 @@ import { ServiceUnavailable } from "./http";
 import { sourceName } from "./market";
 import * as paystack from "./paystack";
 import * as sheets from "./sheets";
-import { compareMarketPrice, confirmReservation, createReservation, requestPhotos, maskEmails, runTool, searchInventory } from "./tools";
+import { compareMarketPrice, confirmReservation, createReservation, requestCallback, requestPhotos, maskEmails, runTool, searchInventory } from "./tools";
 
 vi.mock("./paystack");
 vi.mock("./sheets", async (importOriginal) => ({
@@ -21,7 +21,7 @@ const HEADER =
     ", ",
   );
 
-const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0 };
+const settings = { fxRateNgnPerUsd: 1500, marginPct: 0.1, depositPctInStock: 0.3, depositPctPreOrder: 0.5, holdHoursInStock: 48, doorstepDeliveryNgn: 0, maxDiscountNgn: 500_000 };
 
 function sheetWith(reservation: { ref?: string; status?: string } = {}) {
   const rows = [
@@ -55,16 +55,20 @@ describe("search_inventory", () => {
         colour: "White",
         interior: "Red",
         mileage: "45,000",
+        mileage_display: "45,000 miles",
         stock_type: "in_stock",
         price_basis: "on_ground_lagos",
         price_ngn: 59_900_000,
         price_display: "59.9m",
+        lowest_price_ngn: 59_400_000,
+        lowest_price_display: "59.4m",
         deposit_pct: 30,
         deposit_ngn: 17_970_000,
         deposit_display: "₦17,970,000",
         location: "Lagos",
         highlights: "Pano roof",
         photo_url: "",
+        photo_page_url: "",
         photo_credit: "",
       },
     ]);
@@ -86,7 +90,9 @@ describe("create_reservation", () => {
       amountNgn: 17_970_000,
       metadata: { car_id: "JW-013", customer_name: "Ada", price_ngn: 59_900_000, deposit_ngn: 17_970_000, stock_type: "in_stock" },
     });
-    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ car_id: "JW-013" }), res.reference, "pending_payment");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ car_id: "JW-013" }), res.reference, "pending_payment", "");
+    expect(res).not.toHaveProperty("agreed_price_ngn");
+    expect(vi.mocked(paystack.initializeTransaction).mock.calls[0][0].metadata).not.toHaveProperty("agreed_price_ngn");
   });
 
   it("returns car_not_found, and car_unavailable for reserved or freshly pending cars", async () => {
@@ -107,6 +113,81 @@ describe("create_reservation", () => {
     vi.mocked(paystack.initializeTransaction).mockResolvedValue({ ok: false, message: "Invalid key" });
     expect(await createReservation(input)).toEqual({ status: "payment_init_failed", message: "Invalid key" });
     expect(sheets.writeReservation).not.toHaveBeenCalled();
+  });
+});
+
+describe("create_reservation with an agreed price", () => {
+  const input = { car_id: "JW-013", customer_name: "Ada", customer_email: "ada@example.com" };
+  beforeEach(() => vi.mocked(paystack.initializeTransaction).mockResolvedValue({ ok: true, payment_url: "https://pay/abc" }));
+
+  it("valid agreed price: the deposit is calculated on it, and it is recorded", async () => {
+    // Quoted 59.9m, floor 59.4m, in-stock deposit 30%.
+    const res = await createReservation({ ...input, agreed_price_ngn: 59_650_000 });
+    expect(res).toMatchObject({
+      status: "link_created",
+      price_display: "59.9m",
+      agreed_price_ngn: 59_650_000,
+      agreed_price_display: "59.65m",
+      deposit_ngn: 17_895_000,
+      deposit_display: "₦17,895,000",
+    });
+    expect(vi.mocked(paystack.initializeTransaction).mock.calls[0][0]).toMatchObject({
+      amountNgn: 17_895_000,
+      metadata: { price_ngn: 59_900_000, agreed_price_ngn: 59_650_000, deposit_ngn: 17_895_000 },
+    });
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ car_id: "JW-013" }), res.reference, "pending_payment", 59_650_000);
+  });
+
+  it("accepts the floor and the quoted price exactly, and amounts typed with commas", async () => {
+    expect(await createReservation({ ...input, agreed_price_ngn: 59_400_000 })).toMatchObject({ status: "link_created", deposit_ngn: 17_820_000 });
+    expect(await createReservation({ ...input, agreed_price_ngn: "59,900,000" })).toMatchObject({ status: "link_created", deposit_ngn: 17_970_000, agreed_price_display: "59.9m" });
+  });
+
+  it("below the floor: price_below_minimum, no payment link, row untouched", async () => {
+    expect(await createReservation({ ...input, agreed_price_ngn: 59_399_999 })).toEqual({
+      status: "price_below_minimum",
+      message: "The lowest price for this car is 59.4m.",
+      lowest_price_ngn: 59_400_000,
+      lowest_price_display: "59.4m",
+      price_display: "59.9m",
+    });
+    expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+    expect(sheets.writeReservation).not.toHaveBeenCalled();
+  });
+
+  it("above the quoted price or not a number: invalid_input", async () => {
+    expect((await createReservation({ ...input, agreed_price_ngn: 60_000_000 })).status).toBe("invalid_input");
+    expect((await createReservation({ ...input, agreed_price_ngn: "cheap" })).status).toBe("invalid_input");
+    expect(paystack.initializeTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("request_callback", () => {
+  const rows = () => vi.mocked(sheets.appendRequest).mock.calls.map(([row]) => row.slice(1));
+
+  it("records a callback for a car, with reason and note", async () => {
+    const res = await requestCallback({ reason: "negotiation", car_id: "jw-013", note: "Buyer wants 58m" });
+    expect(res).toMatchObject({ status: "requested", request_type: "callback", reason: "negotiation", car_id: "JW-013", title: "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC" });
+    expect(rows()).toEqual([["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "callback", "negotiation", "Buyer wants 58m", "open"]]);
+    expect(vi.mocked(sheets.appendRequest).mock.calls[0][0][0]).toMatch(/^\d{4}-\d\d-\d\dT/);
+  });
+
+  it("works without a car or a note, and does not read the inventory", async () => {
+    expect(await requestCallback({ reason: "refund" })).toMatchObject({ status: "requested", reason: "refund" });
+    expect(rows()).toEqual([["", "", "callback", "refund", "", "open"]]);
+    expect(sheets.loadSheet).not.toHaveBeenCalled();
+  });
+
+  it("still records the request when the car_id is unknown", async () => {
+    const res = await requestCallback({ reason: "viewing", car_id: "JW-999" });
+    expect(res.status).toBe("requested");
+    expect(res.message).toContain("JW-999");
+    expect(rows()).toEqual([["JW-999", "", "callback", "viewing", "", "open"]]);
+  });
+
+  it("requires a reason", async () => {
+    expect((await requestCallback({ reason: "  " })).status).toBe("invalid_input");
+    expect(sheets.appendRequest).not.toHaveBeenCalled();
   });
 });
 
@@ -139,7 +220,7 @@ describe("confirm_reservation", () => {
   it.each(["failed", "abandoned"])("%s: sets the row back to available", async (status) => {
     tx(status);
     expect((await confirmReservation({ reference: ref })).status).toBe(status);
-    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), "", "available");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), "", "available", "");
   });
 
   it("abandoned within 30 minutes of the link: pending, car stays held", async () => {
@@ -157,7 +238,7 @@ describe("confirm_reservation", () => {
     vi.mocked(sheets.loadSheet).mockResolvedValue(sheetWith({ ref: fresh, status: "pending_payment" }));
     tx("failed");
     expect((await confirmReservation({ reference: fresh })).status).toBe("failed");
-    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), "", "available");
+    expect(sheets.writeReservation).toHaveBeenCalledWith(expect.anything(), expect.anything(), "", "available", "");
   });
 
   it("does not release a row that now belongs to a newer payment", async () => {
@@ -265,7 +346,7 @@ describe("request_photos", () => {
     });
     const [row] = vi.mocked(sheets.appendRequest).mock.calls[0];
     expect(row[0]).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
-    expect(row.slice(1)).toEqual(["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "photos", "open"]);
+    expect(row.slice(1)).toEqual(["JW-013", "2018 Mercedes-Benz GLC 43 AMG Coupe 4MATIC", "photos", "", "", "open"]);
   });
 
   it("unknown car_id: car_not_found, nothing recorded", async () => {

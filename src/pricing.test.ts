@@ -10,6 +10,7 @@ const settings: Settings = {
   depositPctPreOrder: 0.5,
   holdHoursInStock: 48,
   doorstepDeliveryNgn: 0,
+  maxDiscountNgn: 500_000,
 };
 
 describe("roundX9", () => {
@@ -69,6 +70,8 @@ describe("doorstep delivery on pre-orders", () => {
       price_basis: "to_your_doorstep",
       price_ngn: 57_900_000,
       price_display: "57.9m",
+      lowest_price_ngn: 57_400_000,
+      lowest_price_display: "57.4m",
       deposit_pct: 50,
       deposit_ngn: 28_950_000,
       deposit_display: "₦28,950,000",
@@ -78,6 +81,22 @@ describe("doorstep delivery on pre-orders", () => {
   it("does not touch in-stock prices", () => {
     const q = quote({ status: "in_stock", price_ngn: 59_900_000, costs: null }, withDoorstep);
     expect(q).toMatchObject({ price_ngn: 59_900_000, price_basis: "on_ground_lagos" });
+  });
+});
+
+describe("negotiation floor", () => {
+  it("lowest price is the price minus max_discount_ngn, for both stock types", () => {
+    const inStock = quote({ status: "in_stock", price_ngn: 59_900_000, costs: null }, settings);
+    expect(inStock).toMatchObject({ price_ngn: 59_900_000, lowest_price_ngn: 59_400_000, lowest_price_display: "59.4m" });
+
+    const costs = { auctionPrice: 20_000, auctionFees: 1_500, groundShipping: 800, oceanShipping: 2_200, clearing: 10_000 };
+    const preOrder = quote({ status: "on_water", price_ngn: null, costs }, { ...settings, maxDiscountNgn: 1_000_000 });
+    expect(preOrder).toMatchObject({ price_ngn: 56_990_000, lowest_price_ngn: 55_990_000, lowest_price_display: "55.99m" });
+  });
+
+  it("no discount setting means the lowest price is the price", () => {
+    const q = quote({ status: "in_stock", price_ngn: 59_900_000, costs: null }, { ...settings, maxDiscountNgn: 0 });
+    expect(q.lowest_price_ngn).toBe(59_900_000);
   });
 });
 
@@ -108,6 +127,8 @@ describe("quote", () => {
       price_basis: "on_ground_lagos",
       price_ngn: 59_900_000,
       price_display: "59.9m",
+      lowest_price_ngn: 59_400_000,
+      lowest_price_display: "59.4m",
       deposit_pct: 30,
       deposit_ngn: 17_970_000,
       deposit_display: "₦17,970,000",
@@ -122,6 +143,8 @@ describe("quote", () => {
         price_basis: "to_your_doorstep",
         price_ngn: 56_990_000,
         price_display: "56.99m",
+        lowest_price_ngn: 56_490_000,
+        lowest_price_display: "56.49m",
         deposit_pct: 50,
         deposit_ngn: 28_495_000,
         deposit_display: "₦28,495,000",
@@ -132,7 +155,7 @@ describe("quote", () => {
   it("only exposes final naira figures", () => {
     const q = quote({ status: "in_stock", price_ngn: 10_000_000, costs: null }, settings);
     expect(Object.keys(q).sort()).toEqual(
-      ["deposit_display", "deposit_ngn", "deposit_pct", "price_basis", "price_display", "price_ngn", "stock_type"].sort(),
+      ["deposit_display", "deposit_ngn", "deposit_pct", "lowest_price_display", "lowest_price_ngn", "price_basis", "price_display", "price_ngn", "stock_type"].sort(),
     );
   });
 

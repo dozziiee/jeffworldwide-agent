@@ -7,6 +7,7 @@ export type Settings = {
   depositPctPreOrder: number; // fraction
   holdHoursInStock: number;
   doorstepDeliveryNgn: number; // flat naira amount added to every pre-order
+  maxDiscountNgn: number; // the most that can be negotiated off any car's price
 };
 
 export type CostsUsd = {
@@ -26,6 +27,8 @@ export type Quote = {
   price_basis: PriceBasis; // pre-orders are priced delivered; in-stock cars as they stand in Lagos
   price_ngn: number;
   price_display: string;
+  lowest_price_ngn: number; // negotiation floor: price minus the maximum discount
+  lowest_price_display: string;
   deposit_pct: number; // percent, e.g. 30
   deposit_ngn: number;
   deposit_display: string;
@@ -81,11 +84,14 @@ export function quote(
   }
   const pct = inStock ? settings.depositPctInStock : settings.depositPctPreOrder;
   const deposit = depositNgn(price, pct);
+  const lowest = Math.max(price - settings.maxDiscountNgn, 0);
   return {
     stock_type: inStock ? "in_stock" : "pre_order",
     price_basis: inStock ? "on_ground_lagos" : "to_your_doorstep",
     price_ngn: price,
     price_display: formatMillions(price),
+    lowest_price_ngn: lowest,
+    lowest_price_display: formatMillions(lowest),
     deposit_pct: Math.round(pct * 10_000) / 100,
     deposit_ngn: deposit,
     deposit_display: formatNaira(deposit),

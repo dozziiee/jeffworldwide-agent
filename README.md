@@ -1,13 +1,14 @@
 # Jeffworldwide MCP server
 
-A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord AI teammate five tools for selling Jeffworldwide's cars. Chord is the MCP client. The "Jeffworldwide inventory" Google Sheet is the only data store, and Paystack takes the deposits.
+A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord AI teammate six tools for selling Jeffworldwide's cars. Chord is the MCP client. The "Jeffworldwide inventory" Google Sheet is the only data store, and Paystack takes the deposits.
 
 | Tool | What it does | `status` values |
 | --- | --- | --- |
 | `search_inventory` | Free-text and filtered search over cars that are not reserved. Returns up to 5, with final naira price and deposit. | `ok`, `no_match`, `summary` |
-| `create_reservation` | Creates a Paystack deposit link and marks the car `pending_payment`. | `link_created`, `car_not_found`, `car_unavailable`, `payment_init_failed`, `invalid_input` |
+| `create_reservation` | Creates a Paystack deposit link and marks the car `pending_payment`. Accepts an optional negotiated price. | `link_created`, `price_below_minimum`, `car_not_found`, `car_unavailable`, `payment_init_failed`, `invalid_input` |
 | `compare_market_price` | Compares one car's price with market asking prices from the Market tab. | `ok`, `no_comparison`, `car_not_found`, `invalid_input` |
 | `request_photos` | Records a buyer's request for actual photos of a car in the Requests tab. | `requested`, `car_not_found`, `invalid_input` |
+| `request_callback` | Records a request for the team to call the buyer back, in the Requests tab. | `requested`, `invalid_input` |
 | `confirm_reservation` | Verifies the payment and marks the car `reserved`, or releases it. | `reserved`, `amount_mismatch`, `failed`, `abandoned`, `pending`, `reference_not_found`, `car_unavailable` |
 
 Every tool returns a JSON object with a `status` and, when something went wrong, a short `message`. Any tool can also return `service_unavailable` (Paystack or Google down, timing out after 10 seconds, or misconfigured) or `error` (unexpected failure). Raw errors never reach the client.
@@ -56,7 +57,7 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 - `reservation_status`: `available`, `pending_payment` or `reserved`. Blank counts as `available`.
 - Rows that cannot be parsed (no `car_id`, unknown status, missing price or costs) are skipped and logged.
 
-**Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock, doorstep_delivery_ngn`. `doorstep_delivery_ngn` is optional: if the row is missing it counts as 0 and a warning is logged. Percentages can be written as `0.3`, `30` or `30%`. Settings are read fresh on every tool call.
+**Settings** tab, columns `setting, value`: `fx_rate_ngn_per_usd, margin_pct, deposit_pct_in_stock, deposit_pct_pre_order, hold_hours_in_stock, doorstep_delivery_ngn, max_discount_ngn`. `doorstep_delivery_ngn` and `max_discount_ngn` are optional: if a row is missing it counts as 0 and a warning is logged. Percentages can be written as `0.3`, `30` or `30%`. Settings are read fresh on every tool call.
 
 ## Search
 
@@ -85,7 +86,7 @@ Columns: `make, model, year, condition, low_ngn, high_ngn, listings_count, sourc
 
 ## Photos
 
-Each car in a `search_inventory` result carries `photo_url` and `photo_credit` ("Photo: <author>, <licence>, via Wikimedia Commons"), matched on make + model from the **Photos** tab. Both are empty strings when there is no photo. The photo is a representative picture of the model, not of the exact car.
+Each car in a `search_inventory` result carries `photo_url`, `photo_page_url` (the Wikimedia Commons file page) and `photo_credit` ("Photo: <author>, <licence>, via Wikimedia Commons"), matched on make + model from the **Photos** tab. All three are empty strings when there is no photo. Each car also has `mileage_display`, for example "42,800 miles". The photo is a representative picture of the model, not of the exact car.
 
 The Photos tab (`make, model, photo_url, page_url, author, licence`) is filled by a one-off script, not by the server:
 
@@ -95,9 +96,14 @@ npm run fetch-photos
 
 It reads the distinct make + model pairs from Inventory, searches Wikimedia Commons for each, and accepts only JPEGs licensed CC BY, CC BY-SA or public domain (CC0). It prefers file names that state the right model and a model year close to the inventory's, and rejects interiors, details, other body styles and other generations. `photo_url` is a direct 1280px link on `upload.wikimedia.org`. Models with nothing suitable get an empty `photo_url` and are listed at the end. Add `-- --dry-run` to print the picks without writing. The picks are automatic, so check them; any row can be corrected by hand in the sheet. Running the script again replaces the whole tab.
 
-## Photo requests
+## Requests tab
 
-`request_photos` takes a `car_id` and appends a row to a **Requests** tab (created with headers if missing): `timestamp_utc, car_id, title, request_type` ("photos")`, status` ("open"). The team works through the open rows.
+Two tools append rows to a **Requests** tab (created with headers if missing) for the team to work through:
+
+`timestamp_utc, car_id, title, request_type, reason, note, status`
+
+- `request_photos` takes a `car_id` and records `request_type` "photos" with `status` "open"; `reason` and `note` are left empty.
+- `request_callback` takes a `reason` (required, for example "negotiation", "viewing", "photos", "deposit paid", "refund"), plus an optional `car_id` and `note` (for example the price the buyer wants), and records `request_type` "callback" with `status` "open". If the `car_id` is not in the inventory the request is still recorded, without a title, so it is never lost.
 
 ## Logs tab
 
@@ -110,6 +116,8 @@ Columns: `timestamp_utc, tool, inputs_json, status, total_matches, reference, du
 - In stock: `price_ngn` from the sheet.
 - Pre-order: `(auction + fees + ground + ocean + clearing) × fx_rate × (1 + margin_pct) + doorstep_delivery_ngn`, then the X.9 rule in millions of naira: up to `f + 0.9` → `f + 0.9`; up to `f + 0.99` → `f + 0.99`; otherwise `f + 1.9`. So 57.3 → 57.9, 57.95 → 57.99, 57.995 → 58.9.
 - Deposit: price × the deposit percentage for that stock type, rounded to the nearest naira.
+- Negotiation floor: every car carries `lowest_price_ngn` and `lowest_price_display`, which is the price minus `max_discount_ngn`.
+- `create_reservation` accepts an optional `agreed_price_ngn`. It must be between the lowest price and the quoted price; below the floor returns `price_below_minimum` with `lowest_price_display`, and above the quoted price returns `invalid_input`. The deposit is calculated on the agreed price, which goes into the Paystack metadata and into the Inventory column `agreed_price_ngn` (added if missing). The column is cleared when a reservation is created without an agreed price or when a payment fails or is abandoned.
 - Every car carries `price_basis`: `to_your_doorstep` for pre-orders (delivery is in the price) and `on_ground_lagos` for in-stock cars.
 - `price_display` is in Jeff's style (`59.9m`); `deposit_display` is full naira with commas (`₦28,796,000`).
 - The price and deposit are computed when the reservation is created and stored in the Paystack metadata, so later FX changes do not affect a payment already in flight.

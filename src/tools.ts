@@ -5,9 +5,9 @@ import { z } from "zod";
 import { ServiceUnavailable } from "./http";
 import { compareMarket } from "./market";
 import { initializeTransaction, verifyTransaction } from "./paystack";
-import { quote } from "./pricing";
+import { depositNgn, formatMillions, formatNaira, quote } from "./pricing";
 import { searchCars, title, type SearchInput } from "./search";
-import { appendLog, appendRequest, loadMarket, loadPhotos, loadSheet, writeReservation, type Car } from "./sheets";
+import { appendLog, appendRequest, loadMarket, loadPhotos, loadSheet, toNumber, writeReservation, type Car } from "./sheets";
 
 export type ToolResult = { status: string; message?: string; [key: string]: unknown };
 
@@ -33,7 +33,12 @@ export async function searchInventory(input: SearchInput): Promise<ToolResult> {
 
 // ---------- 2. create_reservation ----------
 
-export type CreateInput = { car_id: string; customer_name: string; customer_email: string };
+export type CreateInput = {
+  car_id: string;
+  customer_name: string;
+  customer_email: string;
+  agreed_price_ngn?: number | string; // optional negotiated price
+};
 
 export async function createReservation(input: CreateInput): Promise<ToolResult> {
   const name = String(input.customer_name ?? "").trim();
@@ -55,31 +60,58 @@ export async function createReservation(input: CreateInput): Promise<ToolResult>
 
   // Price and deposit are fixed here; they travel in Paystack metadata, which locks the FX rate.
   const q = quote(car, sheet.settings);
+
+  // A negotiated price must sit between the floor and the quoted price; the deposit follows it.
+  let agreed: number | undefined;
+  let deposit = q.deposit_ngn;
+  if (String(input.agreed_price_ngn ?? "").trim() !== "") {
+    agreed = Math.round(toNumber(input.agreed_price_ngn));
+    if (!Number.isFinite(agreed)) {
+      return { status: "invalid_input", message: "agreed_price_ngn must be a whole naira amount." };
+    }
+    if (agreed < q.lowest_price_ngn) {
+      return {
+        status: "price_below_minimum",
+        message: `The lowest price for this car is ${q.lowest_price_display}.`,
+        lowest_price_ngn: q.lowest_price_ngn,
+        lowest_price_display: q.lowest_price_display,
+        price_display: q.price_display,
+      };
+    }
+    if (agreed > q.price_ngn) {
+      return { status: "invalid_input", message: `agreed_price_ngn is above the quoted price of ${q.price_display}.` };
+    }
+    deposit = depositNgn(agreed, q.deposit_pct / 100);
+  }
+
   const idPart = car.car_id.replace(/[^A-Za-z0-9]+/g, "-").replace(/^JW-/i, "");
   const reference = `JW-${idPart}-${Date.now()}`;
 
   const init = await initializeTransaction({
     email,
-    amountNgn: q.deposit_ngn,
+    amountNgn: deposit,
     reference,
     metadata: {
       car_id: car.car_id,
       customer_name: name,
       price_ngn: q.price_ngn,
-      deposit_ngn: q.deposit_ngn,
+      deposit_ngn: deposit,
       stock_type: q.stock_type,
+      ...(agreed !== undefined && { agreed_price_ngn: agreed }),
     },
   });
   if (!init.ok) return { status: "payment_init_failed", message: init.message };
 
-  await writeReservation(sheet, car, reference, "pending_payment");
+  // Record the agreed price on the row, or clear one left over from an earlier reservation.
+  await writeReservation(sheet, car, reference, "pending_payment", agreed ?? "");
   return {
     status: "link_created",
     payment_url: init.payment_url,
     reference,
-    deposit_ngn: q.deposit_ngn,
-    deposit_display: q.deposit_display,
+    deposit_ngn: deposit,
+    deposit_display: formatNaira(deposit),
     price_display: q.price_display,
+    ...(agreed !== undefined && { agreed_price_ngn: agreed, agreed_price_display: formatMillions(agreed) }),
   };
 }
 
@@ -119,7 +151,7 @@ export async function confirmReservation(input: { reference: string }): Promise<
 
   if (dead) {
     // Only release the row if it still belongs to this payment.
-    if (ownsRow && car.reservation_status !== "available") await writeReservation(sheet, car, "", "available");
+    if (ownsRow && car.reservation_status !== "available") await writeReservation(sheet, car, "", "available", "");
     const status = tx.status === "abandoned" ? "abandoned" : "failed";
     return { status, message: `Payment ${tx.status}. The car is available again.`, car_id: car.car_id };
   }
@@ -165,13 +197,38 @@ export async function requestPhotos(input: { car_id: string }): Promise<ToolResu
   const car = findCar(cars, input.car_id);
   if (!car) return { status: "car_not_found", message: `No car with id ${input.car_id}.` };
 
-  await appendRequest([new Date().toISOString(), car.car_id, title(car), "photos", "open"]);
+  await appendRequest([new Date().toISOString(), car.car_id, title(car), "photos", "", "", "open"]);
   return {
     status: "requested",
     message: "Photo request recorded for the team. Actual photos of this car will be sent when ready.",
     car_id: car.car_id,
     title: title(car),
     request_type: "photos",
+  };
+}
+
+// ---------- 6. request_callback ----------
+
+export type CallbackInput = { reason: string; car_id?: string; note?: string };
+
+export async function requestCallback(input: CallbackInput): Promise<ToolResult> {
+  const reason = String(input.reason ?? "").trim();
+  const carId = String(input.car_id ?? "").trim();
+  const note = String(input.note ?? "").trim();
+  if (!reason) return { status: "invalid_input", message: "reason is required." };
+
+  // The car is optional. An unknown car_id is still recorded, so a buyer's request is never lost.
+  const car = carId ? findCar((await loadSheet()).cars, carId) : undefined;
+  await appendRequest([new Date().toISOString(), car?.car_id ?? carId, car ? title(car) : "", "callback", reason, note, "open"]);
+  return {
+    status: "requested",
+    message:
+      carId && !car
+        ? `Callback request recorded for the team. Note: no car with id ${carId} was found, so it was recorded without a car title.`
+        : "Callback request recorded for the team.",
+    request_type: "callback",
+    reason,
+    ...(car && { car_id: car.car_id, title: title(car) }),
   };
 }
 
@@ -238,7 +295,7 @@ export function registerTools(server: McpServer) {
     "search_inventory",
     {
       description:
-        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. photo_url is a representative photo of the model (not this exact car); when you show it, show photo_credit with it. Both are empty when there is no photo. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
+        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. lowest_price_ngn is the negotiation floor: never agree a price below it. photo_url is a representative photo of the model (not this exact car); when you show it, show photo_credit with it (photo_page_url is its Wikimedia Commons page). These are empty when there is no photo. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
       inputSchema: {
         query: z.string().optional().describe('Free text, e.g. "white GLC 43"'),
         make: z.string().optional(),
@@ -255,11 +312,12 @@ export function registerTools(server: McpServer) {
     "create_reservation",
     {
       description:
-        "Create a Paystack deposit payment link for a car and mark it pending_payment. status: link_created | car_not_found | car_unavailable | payment_init_failed | invalid_input | service_unavailable.",
+        "Create a Paystack deposit payment link for a car and mark it pending_payment. Pass agreed_price_ngn only when a lower price was negotiated: it must be between the car's lowest_price_ngn and its quoted price, and the deposit is then calculated on it. status: link_created | price_below_minimum (see lowest_price_display) | car_not_found | car_unavailable | payment_init_failed | invalid_input | service_unavailable.",
       inputSchema: {
         car_id: z.string(),
         customer_name: z.string(),
         customer_email: z.string(),
+        agreed_price_ngn: numberish.describe("Optional negotiated price in whole naira"),
       },
     },
     (input) => runTool("create_reservation", input, () => createReservation(input)),
@@ -293,5 +351,19 @@ export function registerTools(server: McpServer) {
       inputSchema: { car_id: z.string() },
     },
     (input) => runTool("request_photos", input, () => requestPhotos(input)),
+  );
+
+  server.registerTool(
+    "request_callback",
+    {
+      description:
+        'Ask Jeffworldwide\'s team to call or message the buyer back. Use when something needs a human: negotiation beyond the lowest price, a viewing, a deposit already paid, a refund, or anything you cannot settle. reason is required (e.g. "negotiation", "viewing", "photos", "deposit paid", "refund"); car_id and note are optional (put the detail in note, e.g. the price the buyer wants). status: requested | invalid_input | service_unavailable.',
+      inputSchema: {
+        reason: z.string(),
+        car_id: z.string().optional(),
+        note: z.string().optional(),
+      },
+    },
+    (input) => runTool("request_callback", input, () => requestCallback(input)),
   );
 }
