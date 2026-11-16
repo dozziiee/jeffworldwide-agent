@@ -1,7 +1,7 @@
 # Jeff Worldwide MCP server
 
 Six tools that let a Chord AI teammate sell cars on WhatsApp for
-Jeffworldwide, a Lagos dealership: search live inventory, quote all-in
+Jeff Worldwide, a Lagos dealership: search live inventory, quote all-in
 "to your doorstep" prices, send a car page with VIN and accident
 history, compare against Lagos market listings, take a Paystack
 deposit and reserve the car. All data lives in one Google Sheet; the
@@ -11,7 +11,7 @@ agent itself runs on Chord.
 the values, `npm run dev`. Deployed on Vercel, served at `/mcp` over
 Streamable HTTP with a bearer token.
 
-> **Demo project.** Jeffworldwide is a real Lagos dealership, but this
+> **Demo project.** Jeff Worldwide is a real Lagos dealership, but this
 > is an unaffiliated demo built for a take-home exercise. All
 > inventory, prices, VINs and vehicle history are made up, photos are
 > Creative Commons images of the model rather than the actual car, and
