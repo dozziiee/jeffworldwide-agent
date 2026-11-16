@@ -1,4 +1,4 @@
-# Jeffworldwide MCP server
+# Jeff Worldwide MCP server
 
 Six tools that let a Chord AI teammate sell cars on WhatsApp for
 Jeffworldwide, a Lagos dealership: search live inventory, quote all-in
