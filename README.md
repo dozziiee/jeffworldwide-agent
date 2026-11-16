@@ -244,7 +244,7 @@ Besides the unit tests, `src/mcp.contract.test.ts` starts the app and connects w
 ## Deploy to Vercel
 
 1. Push the project to a Git repository and import it in Vercel, or run `npx vercel` from this folder.
-2. In Project Settings → Environment Variables, add the five variables above. Paste `GOOGLE_PRIVATE_KEY` exactly as it appears in the service account JSON (with the `\n` sequences).
+2. In Project Settings → Environment Variables, add the eleven variables above (`TWILIO_CONTENT_SID` and `PUBLIC_BASE_URL` are optional). Paste `GOOGLE_PRIVATE_KEY` exactly as it appears in the service account JSON (with the `\n` sequences).
 3. Deploy (`npx vercel --prod`). `vercel.json` routes every path to the Express app in `api/index.ts`.
 4. Check `https://<your-app>.vercel.app/health` returns `ok`, then give Chord the URL `https://<your-app>.vercel.app/mcp` and the bearer token.
 
@@ -254,7 +254,7 @@ Besides the unit tests, `src/mcp.contract.test.ts` starts the app and connects w
 npx @modelcontextprotocol/inspector
 ```
 
-In the Inspector: choose transport **Streamable HTTP**, set the URL to `http://localhost:3000/mcp` (or the Vercel URL), open Authentication and set header `Authorization` to `Bearer <your MCP_AUTH_TOKEN>`, then Connect. Under Tools, List Tools should show the three tools. A good run-through:
+In the Inspector: choose transport **Streamable HTTP**, set the URL to `http://localhost:3000/mcp` (or the Vercel URL), open Authentication and set header `Authorization` to `Bearer <your MCP_AUTH_TOKEN>`, then Connect. Under Tools, List Tools should show the six tools. A good run-through:
 
 1. `search_inventory` with `query: "white GLC 43"`.
 2. `create_reservation` with a `car_id` from the results; open the `payment_url` and pay with a [Paystack test card](https://paystack.com/docs/payments/test-payments/).
