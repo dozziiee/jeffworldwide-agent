@@ -1,6 +1,21 @@
 # Jeffworldwide MCP server
 
-A small remote [MCP](https://modelcontextprotocol.io) server that gives a Chord AI teammate six tools for selling Jeffworldwide's cars. Chord is the MCP client. The "Jeffworldwide inventory" Google Sheet is the only data store, and Paystack takes the deposits.
+Six tools that let a Chord AI teammate sell cars on WhatsApp for
+Jeffworldwide, a Lagos dealership: search live inventory, quote all-in
+"to your doorstep" prices, send a car page with VIN and accident
+history, compare against Lagos market listings, take a Paystack
+deposit and reserve the car. All data lives in one Google Sheet; the
+agent itself runs on Chord.
+
+**Quick start:** `npm install`, copy `.env.example` to `.env`, fill in
+the values, `npm run dev`. Deployed on Vercel, served at `/mcp` over
+Streamable HTTP with a bearer token.
+
+> **Demo project.** Jeffworldwide is a real Lagos dealership, but this
+> is an unaffiliated demo built for a take-home exercise. All
+> inventory, prices, VINs and vehicle history are made up, photos are
+> Creative Commons images of the model rather than the actual car, and
+> Paystack runs in test mode, so no real money moves.
 
 | Tool | What it does | `status` values |
 | --- | --- | --- |
@@ -112,6 +127,8 @@ Copy `.env.example` to `.env` and fill it in. `.env` is git-ignored; never commi
 `link_created`, `link_exists` and `already_paid` all include `reference_line`, for example "Ref: JW-091-1794755450557"; so does `reserved` from `confirm_reservation`.
 
 `confirm_reservation` takes a `reference`, or a `car_id`, in which case it uses the `reservation_ref` on that car's row. If neither gives a usable reference it returns `reference_not_found`.
+
+Card payments are disabled. A 40% deposit on a pre-order runs to tens of millions of naira, far above Nigerian card limits, so every card attempt would decline at the moment the buyer had decided to pay. Transactions are configured for bank transfer.
 
 ### Payment review
 
@@ -252,18 +269,7 @@ In the Inspector: choose transport **Streamable HTTP**, set the URL to `http://l
 - There is no locking: the sheet is read, then written. Two reservations for the same car in the same second could both get a link; `confirm_reservation` then reserves for the first to pay.
 - Logs go to the console (Vercel → Logs: tool name, inputs without the email, outcome and duration) and to the Logs tab in the sheet.
 
-## Field notes from live testing (Paystack test mode, 12 Nov 2026)
-
-- **Paid deposit:** ₦3.79m on an in-stock car → `reserved` with `held_until`; a second confirm gave the same answer.
-- **Unpaid link checked early:** → `pending`, car stays held.
-- **Declined card:** ₦3.79m with a declining test card → Paystack status `failed` → `confirm_reservation` returned `failed` and freed the car.
-- **Biggest deposit:** ₦108.76m (LX 600, 40% of 271.9m). Paystack created the link without complaint. On the checkout, **card payment was declined three times with "Insufficient Funds"**, then **bank transfer succeeded** and the car was reserved.
-
-Go-live points:
-
-- Deposits of this size may not go through by card. Check Paystack's live limits (and typical customer card limits) for large amounts, and expect customers to pay large deposits by bank transfer. Chord should suggest transfer if a card is declined.
-- A declined attempt does not close the link: the customer can retry or switch method on the same checkout. If `confirm_reservation` runs between a decline and the retry, it returns `failed` and frees the car; a later successful payment on that link is still honoured when confirmed, unless someone else reserved the car in between.
-- Switch `PAYSTACK_SECRET_KEY` to the live key only at go-live; the code is the same.
+Deployment field notes are a separate submission document.
 
 ## Photo credits
 
