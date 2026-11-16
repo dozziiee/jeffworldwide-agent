@@ -1,4 +1,4 @@
-// Pricing rules for Jeffworldwide. Pure functions, no I/O.
+// Pricing rules for Jeff Worldwide. Pure functions, no I/O.
 
 export type Settings = {
   fxRateNgnPerUsd: number;

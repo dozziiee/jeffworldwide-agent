@@ -419,7 +419,7 @@ export function registerTools(server: McpServer, baseUrl = "") {
     "search_inventory",
     {
       description:
-        'Search Jeffworldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. lowest_price_ngn is the negotiation floor: never agree a price below it. If the buyer asks for a better price, open with first_offer_ngn (first_offer_display); do not work out discounts yourself. photo_link is the public page for that car, with a photo of the model, the VIN and its vehicle history: send that link when the buyer wants to see the car (it is empty when the model has no photo). vin, title_status, owners and accidents_reported are its history details. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
+        'Search Jeff Worldwide cars that are not reserved. Free text is understood, including Pidgin and nicknames ("how far that benz gle"). All inputs are optional and combine with AND. Returns at most 5 cars, cheapest first, with final naira price and deposit. lowest_price_ngn is the negotiation floor: never agree a price below it. If the buyer asks for a better price, open with first_offer_ngn (first_offer_display); do not work out discounts yourself. photo_link is the public page for that car, with a photo of the model, the VIN and its vehicle history: send that link when the buyer wants to see the car (it is empty when the model has no photo). vin, title_status, owners and accidents_reported are its history details. price_basis says what the price covers: to_your_doorstep for pre-orders (delivery included), on_ground_lagos for in-stock cars. Always read total_matches and truncated: when truncated is true there are more cars than shown, so use refine_options (model, year, stock_type with counts) to ask the buyer to narrow down. status: ok | no_match (see unmatched_terms) | summary (no search terms: counts by make and model, not a car list) | service_unavailable.',
       inputSchema: {
         query: z.string().optional().describe('Free text, e.g. "white GLC 43"'),
         make: z.string().optional(),
@@ -461,7 +461,7 @@ export function registerTools(server: McpServer, baseUrl = "") {
     "compare_market_price",
     {
       description:
-        "Compare one of Jeffworldwide's cars with market asking prices for the same make, model and year (or the nearest year within one, flagged by exact_year_match: false). Returns Jeff's price, the market low and high, source_name (where the figures come from), condition, and difference_vs_low_ngn (Jeff's price minus the market low). Always pass on the note about asking prices. status: ok | no_comparison | car_not_found | invalid_input | service_unavailable.",
+        "Compare one of Jeff Worldwide's cars with market asking prices for the same make, model and year (or the nearest year within one, flagged by exact_year_match: false). Returns Jeff's price, the market low and high, source_name (where the figures come from), condition, and difference_vs_low_ngn (Jeff's price minus the market low). Always pass on the note about asking prices. status: ok | no_comparison | car_not_found | invalid_input | service_unavailable.",
       inputSchema: { car_id: z.string() },
     },
     (input) => runTool("compare_market_price", input, () => compareMarketPrice(input)),
@@ -471,7 +471,7 @@ export function registerTools(server: McpServer, baseUrl = "") {
     "request_photos",
     {
       description:
-        "Record a buyer's request for actual photos of a specific car, for Jeffworldwide's team to follow up. Use when the buyer wants real photos beyond the representative model photo. status: requested | car_not_found | invalid_input | service_unavailable.",
+        "Record a buyer's request for actual photos of a specific car, for Jeff Worldwide's team to follow up. Use when the buyer wants real photos beyond the representative model photo. status: requested | car_not_found | invalid_input | service_unavailable.",
       inputSchema: { car_id: z.string() },
     },
     (input) => runTool("request_photos", input, () => requestPhotos(input)),
@@ -481,7 +481,7 @@ export function registerTools(server: McpServer, baseUrl = "") {
     "request_callback",
     {
       description:
-        'Ask Jeffworldwide\'s team to call or message the buyer back. Use when something needs a human: negotiation beyond the lowest price, a viewing, a deposit already paid, a refund, or anything you cannot settle. reason is required (e.g. "negotiation", "viewing", "photos", "deposit paid", "refund", "payment dispute"); car_id, reference (a payment reference) and note are optional (put the detail in note, e.g. the price the buyer wants). Use the exact reason "payment dispute" when a buyer says they paid but the payment is not confirmed: the car is then held for 24 hours while the team checks. status: requested | invalid_input | service_unavailable.',
+        'Ask Jeff Worldwide\'s team to call or message the buyer back. Use when something needs a human: negotiation beyond the lowest price, a viewing, a deposit already paid, a refund, or anything you cannot settle. reason is required (e.g. "negotiation", "viewing", "photos", "deposit paid", "refund", "payment dispute"); car_id, reference (a payment reference) and note are optional (put the detail in note, e.g. the price the buyer wants). Use the exact reason "payment dispute" when a buyer says they paid but the payment is not confirmed: the car is then held for 24 hours while the team checks. status: requested | invalid_input | service_unavailable.',
       inputSchema: {
         reason: z.string(),
         car_id: z.string().optional(),

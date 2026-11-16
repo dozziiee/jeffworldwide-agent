@@ -1,4 +1,4 @@
-# Build brief: Jeffworldwide MCP server
+# Build brief: Jeff Worldwide MCP server
 
 Build a small remote MCP server in TypeScript (Node 20) that a Chord AI teammate will call as its tools. Chord is the MCP client. Deploy target: Vercel.
 

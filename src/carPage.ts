@@ -50,7 +50,7 @@ ${head}
 </head>
 <body>
 <main>
-<p class="brand">Jeffworldwide</p>
+<p class="brand">Jeff Worldwide</p>
 ${body}
 </main>
 </body>
@@ -70,10 +70,10 @@ export function renderCarPage(car: Car, q: Quote, photo: PhotoRow | undefined, p
   const description = `${price} ${basis}. ${[car.colour, mileageDisplay(car.mileage)].filter(Boolean).join(", ")}.`;
 
   const head = [
-    `<title>${escapeHtml(name)} | Jeffworldwide</title>`,
+    `<title>${escapeHtml(name)} | Jeff Worldwide</title>`,
     `<meta name="description" content="${escapeHtml(description)}">`,
     `<meta property="og:type" content="website">`,
-    `<meta property="og:site_name" content="Jeffworldwide">`,
+    `<meta property="og:site_name" content="Jeff Worldwide">`,
     `<meta property="og:title" content="${escapeHtml(`${name} | ${price} ${basis}`)}">`,
     `<meta property="og:description" content="${escapeHtml(description)}">`,
     safeUrl(pageUrl) && `<meta property="og:url" content="${escapeHtml(pageUrl)}">`,
@@ -112,7 +112,7 @@ export function renderCarPage(car: Car, q: Quote, photo: PhotoRow | undefined, p
 
 export function renderMessagePage(heading: string, message: string): string {
   return page(
-    `<title>${escapeHtml(heading)} | Jeffworldwide</title>\n<meta name="robots" content="noindex">`,
+    `<title>${escapeHtml(heading)} | Jeff Worldwide</title>\n<meta name="robots" content="noindex">`,
     `<h1>${escapeHtml(heading)}</h1>\n<p>${escapeHtml(message)}</p>`,
   );
 }
