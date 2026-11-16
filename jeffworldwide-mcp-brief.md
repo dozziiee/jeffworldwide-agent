@@ -15,7 +15,7 @@ Build a small remote MCP server in TypeScript (Node 20) that a Chord AI teammate
 
 - `MCP_AUTH_TOKEN`: shared secret Chord sends as a bearer token
 - `PAYSTACK_SECRET_KEY`: Paystack **test** secret key (`sk_test_...`)
-- `GOOGLE_SHEET_ID`: ID of the "Jeffworldwide inventory" sheet
+- `GOOGLE_SHEET_ID`: ID of the Jeff Worldwide inventory sheet
 - `GOOGLE_SERVICE_ACCOUNT_EMAIL` and `GOOGLE_PRIVATE_KEY`: service account with Editor access to the sheet
 
 ## Data: Google Sheet with two tabs
